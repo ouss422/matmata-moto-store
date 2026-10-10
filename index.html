@@ -43,7 +43,7 @@ const $=s=>document.querySelector(s),f=(n,d=2)=>(+n||0).toLocaleString('fr-FR',{
 esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])),
 today=()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')},
 now=()=>today()+'T'+new Date().toTimeString().slice(0,5);
-let S,cart=[],pg={},KEY='matmata_v1';
+let S,cart=[],pg={},KEY='matmata_v3';
 const PAGES=[['dash','📊 Tableau de bord'],['prod','📦 Produits'],['vente','🛒 Ventes'],['rap','📈 Rapports'],['alert','⚠️ Alertes'],['cmd','🚚 Commandes'],['cmp','⚖️ Comparaison prix'],['four','🏭 Fournisseurs'],['cli','👤 Clients'],['data','💾 Données']];
 const save=()=>localStorage.setItem(KEY,JSON.stringify(S));
 const P=c=>S.products.find(p=>p.code===c);
@@ -62,7 +62,7 @@ async function init(){
   S.products.forEach(p=>{if(p.sup)S.prices.push({code:p.code,sup:p.sup,price:p.last||p.buy,d:'import'})});
   save();
  }
- $('#nav').innerHTML='<h1>🏍️ Matmata Moto Store</h1><div style="margin:-8px 8px 10px;font-size:11px;color:var(--mu)">version 3 · 10/10/2026</div>'+PAGES.map(([k,t])=>`<a href="#${k}" data-k="${k}">${t}</a>`).join('');
+ $('#nav').innerHTML='<h1>🏍️ Matmata Moto Store</h1><div style="margin:-8px 8px 10px;font-size:11px;color:var(--mu)">version 4 · 10/10/2026</div>'+PAGES.map(([k,t])=>`<a href="#${k}" data-k="${k}">${t}</a>`).join('');
  addEventListener('hashchange',route);route();
 }
 function route(){
@@ -171,7 +171,7 @@ function importX(inp){const file=inp.files[0];if(!file||needX())return;const r=n
   if(!map.code||!map.name)return alert('Colonnes introuvables : le fichier doit contenir au moins « Code article » et « Désignation ».');
   const num=v=>{const x=parseFloat(String(v).replace(/\s/g,'').replace(',','.'));return isNaN(x)?0:x},seen=new Set(),L=[];let dup=0;
   rows.forEach(o=>{const code=String(o[map.code]).trim(),name=String(o[map.name]).trim();if(!code||!name)return;let c2=code;if(seen.has(c2)){dup++;let n=2;while(seen.has(code+'-'+n))n++;c2=code+'-'+n}seen.add(c2);
-   const lp=map.last?num(o[map.last]):0;L.push({code:c2,name,cat:map.cat?String(o[map.cat]).trim():'',buy:num(o[map.buy]),sell:num(o[map.sell]),stock:num(o[map.stock]),thr:map.thr?num(o[map.thr]):1,sup:map.sup?String(o[map.sup]).trim():'',last:lp>0?lp:null})});
+   const lp=map.last?num(o[map.last]):0;L.push({code:c2,name,cat:map.cat?String(o[map.cat]).trim():'',buy:num(o[map.buy]),sell:num(o[map.sell]),stock:num(o[map.stock]),thr:1,sup:map.sup?String(o[map.sup]).trim():'',last:lp>0?lp:null})});
   if(!L.length)return alert('Aucun produit valide trouvé');
   const addPrices=p=>{if(p.sup&&p.buy)setPrice(p.code,p.sup,p.buy)};
   if(xMode==='replace'){
