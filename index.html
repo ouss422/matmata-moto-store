@@ -114,17 +114,20 @@ function tp(){const g=pg.prod,L=S.products.filter(p=>matchP(p,g.fld,g.q));
  <td class="n"><span class="tag ${isAl(p)?'r':'v'}">${p.stock}</span></td><td>${p.thr}</td>
  <td><button class="s" onclick="formP('${esc(p.code)}')">Modifier</button> <button class="s" onclick="formA('${esc(p.code)}')">Arrivage</button> <button class="s" onclick="hist('${esc(p.code)}')">Historique</button> <button class="s d" onclick="delP('${esc(p.code)}')">Suppr.</button></td></tr>`)}</table>
  ${L.length>g.n?`<p><button onclick="pg.prod.n+=100;tp()">Afficher plus (${L.length-g.n})</button></p>`:''}`}
+const cats=(extra)=>[...new Set([...S.products.map(p=>String(p.cat||'').trim()),extra&&String(extra).trim()].filter(Boolean))].sort((a,b)=>a.localeCompare(b,'fr'));
 function formP(code){const p=code?P(code):{code:'',name:'',cat:'',buy:'',sell:'',stock:0,thr:1,sup:''};
  modal(`<h3 style="margin-top:0">${code?'Modifier':'Nouveau'} produit</h3>
  <label>Code article</label><input id="f1" value="${esc(p.code)}" ${code?'readonly':''}><label>Désignation</label><input id="f2" value="${esc(p.name)}">
- <label>Catégorie</label><input id="f3" value="${esc(p.cat)}"><label>Prix d'achat (DT)</label><input id="f4" type="number" step="0.001" value="${p.buy}">
+ <label>Catégorie</label><select id="f3" onchange="$('#f3n').style.display=this.value==='__new__'?'block':'none'"><option value="">—</option>${opt(cats(p.cat),p.cat)}<option value="__new__">➕ Nouvelle catégorie…</option></select><input id="f3n" placeholder="Nom de la nouvelle catégorie" style="display:none;margin-top:6px"><label>Prix d'achat (DT)</label><input id="f4" type="number" step="0.001" value="${p.buy}">
  <label>Prix de vente (DT)</label><input id="f5" type="number" step="0.001" value="${p.sell}"><label>Quantité en stock</label><input id="f6" type="number" value="${p.stock}">
  <label>Seuil d'alerte</label><input id="f7" type="number" value="${p.thr}"><label>Fournisseur</label><select id="f8"><option value="">—</option>${opt(S.suppliers.map(s=>s.name),p.sup)}</select>
  <p><button class="p" onclick="saveP('${esc(code||'')}')">Enregistrer</button> <button onclick="closeM()">Annuler</button></p>`)}
 function saveP(old){const v=i=>$('#f'+i).value.trim(),code=v(1);
  if(!code||!v(2))return alert('Code et désignation obligatoires');
  if(!old&&P(code))return alert('Ce code existe déjà');
- const d={name:v(2),cat:v(3),buy:+v(4)||0,sell:+v(5)||0,stock:+v(6)||0,thr:+v(7)||0,sup:v(8)};
+ const cat=$('#f3').value==='__new__'?$('#f3n').value.trim():v(3);
+ if($('#f3').value==='__new__'&&!cat)return alert('Saisissez le nom de la nouvelle catégorie');
+ const d={name:v(2),cat,buy:+v(4)||0,sell:+v(5)||0,stock:+v(6)||0,thr:+v(7)||0,sup:v(8)};
  if(old){const p=P(old);if(d.stock!==p.stock)mv(old,'Ajustement',d.stock-p.stock,'Modification manuelle');Object.assign(p,d)}
  else{S.products.push({code,last:null,...d});mv(code,'Création',d.stock,'Stock initial')}
  if(d.sup&&d.buy)setPrice(code,d.sup,d.buy);save();closeM();go()}
@@ -138,34 +141,40 @@ function setPrice(code,sup,price){const x=S.prices.find(y=>y.code===code&&y.sup=
 const nk=s=>String(s??'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'');
 function needX(){if(typeof XLSX==='undefined'){alert('Bibliothèque Excel non chargée (connexion internet requise).');return true}}
 function exportX(){if(needX())return;
- const d=S.products.map(p=>({'Code article':p.code,'Désignation':p.name,'Catégorie':p.cat,"Prix d'achat":p.buy,'Prix de vente':p.sell,'Quantité':p.stock,"Seuil d'alerte":p.thr,'Fournisseur':p.sup}));
+ const d=S.products.map(p=>({'Code article':p.code,'Désignation':p.name,'Catégorie':p.cat,"Prix d'achat":p.buy,'Prix de vente':p.sell,'Quantité':p.stock,"Seuil d'alerte":p.thr,'Fournisseur':p.sup,"Dernier prix d'achat":p.last||''}));
  const ws=XLSX.utils.json_to_sheet(d),wb=XLSX.utils.book_new();ws['!cols']=[{wch:16},{wch:40},{wch:18},{wch:12},{wch:12},{wch:10},{wch:12},{wch:22}];
  XLSX.utils.book_append_sheet(wb,ws,'Produits');XLSX.writeFile(wb,'produits-'+today()+'.xlsx')}
 let xMode='add';
 function pickX(m){xMode=m;const i=$('#xf');i.value='';i.click()}
-const XA={sup:['fournisseur'],code:['code','sku','reference','ref'],name:['designation','libelle','nomproduit','nomarticle','nom','article'],cat:['categorie','category','famille'],
- buy:['prixachat','prixdachat','achat'],sell:['prixvente','vente','prix'],stock:['quantite','qte','stock','qty'],thr:['seuil']};
+const XA={code:['code','sku','reference','ref'],name:['designation','libelle','nomproduit','nomarticle','nom','article'],cat:['categorie','category','famille'],
+ last:['dernierprix'],buy:['prixdachat','prixachat'],sell:['prixdevente','prixvente','vente','prix'],
+ stock:['stockactuel','quantite','qtestock','stock','qte','qty'],thr:['seuil']};
+const XEX={stock:['initial','vendue','vendu','achetee','alerte'],buy:['dernier'],sell:['achat'],cat:[],name:[],code:[],last:[],thr:[]};
+function mapCols(keys){const map={},used=new Set();
+ for(const f of ['code','name','cat','last','buy','sell','stock','thr']){
+  outer:for(const a of XA[f])for(const k of keys){const n=nk(k);if(used.has(k)||!n.startsWith(a)||XEX[f].some(x=>n.includes(x)))continue;map[f]=k;used.add(k);break outer}}
+ const sk=keys.find(k=>!used.has(k)&&nk(k).includes('fournisseur'));if(sk)map.sup=sk;return map}
 function importX(inp){const file=inp.files[0];if(!file||needX())return;const r=new FileReader();
  r.onload=()=>{try{
   const wb=XLSX.read(r.result,{type:'array'});let rows=[];
   for(const sn of wb.SheetNames){const t=XLSX.utils.sheet_to_json(wb.Sheets[sn],{defval:''});if(t.length&&Object.keys(t[0]).some(k=>nk(k).startsWith('code')||nk(k).startsWith('sku'))&&Object.keys(t[0]).some(k=>nk(k).startsWith('designation')||nk(k).startsWith('libelle'))){rows=t;break}}
   if(!rows.length)rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''});
   if(!rows.length)return alert('Fichier vide');
-  const keys=Object.keys(rows[0]),map={},used=new Set();
-  for(const f of Object.keys(XA)){const k=keys.find(k=>!used.has(k)&&XA[f].some(a=>f==='sup'?nk(k).includes(a):nk(k).startsWith(a)));if(k){map[f]=k;used.add(k)}}
+  const map=mapCols(Object.keys(rows[0]));
+  if(!map.stock&&!confirm('Aucune colonne de quantité (« Stock Actuel » ou « Quantité ») trouvée : les quantités seront mises à 0. Continuer ?'))return;
   if(!map.code||!map.name)return alert('Colonnes introuvables : le fichier doit contenir au moins « Code article » et « Désignation ».');
   const num=v=>{const x=parseFloat(String(v).replace(/\s/g,'').replace(',','.'));return isNaN(x)?0:x},seen=new Set(),L=[];let dup=0;
-  rows.forEach(o=>{const code=String(o[map.code]).trim(),name=String(o[map.name]).trim();if(!code||!name)return;if(seen.has(code)){dup++;return}seen.add(code);
-   L.push({code,name,cat:map.cat?String(o[map.cat]).trim():'',buy:num(o[map.buy]),sell:num(o[map.sell]),stock:num(o[map.stock]),thr:map.thr?num(o[map.thr]):1,sup:map.sup?String(o[map.sup]).trim():'',last:null})});
+  rows.forEach(o=>{const code=String(o[map.code]).trim(),name=String(o[map.name]).trim();if(!code||!name)return;let c2=code;if(seen.has(c2)){dup++;let n=2;while(seen.has(code+'-'+n))n++;c2=code+'-'+n}seen.add(c2);
+   const lp=map.last?num(o[map.last]):0;L.push({code:c2,name,cat:map.cat?String(o[map.cat]).trim():'',buy:num(o[map.buy]),sell:num(o[map.sell]),stock:num(o[map.stock]),thr:map.thr?num(o[map.thr]):1,sup:map.sup?String(o[map.sup]).trim():'',last:lp>0?lp:null})});
   if(!L.length)return alert('Aucun produit valide trouvé');
   const addPrices=p=>{if(p.sup&&p.buy)setPrice(p.code,p.sup,p.buy)};
   if(xMode==='replace'){
    if(!confirm(`Remplacer les ${S.products.length} produits existants par les ${L.length} produits du fichier ?\n(Les ventes sont conservées.) Pensez à exporter une sauvegarde avant.`))return;
-   S.products=L;S.prices=S.prices.filter(x=>seen.has(x.code));L.forEach(addPrices);S.mvts.push({d:now(),code:'—',type:'Remplacement liste',qty:L.length,note:file.name});
-   save();alert(`${L.length} produits importés (liste remplacée).${dup?`\n${dup} doublon(s) ignoré(s).`:''}`);
+   S.products=L;S.prices=[];L.forEach(addPrices);S.mvts.push({d:now(),code:'—',type:'Remplacement liste',qty:L.length,note:file.name});
+   save();alert(`Liste remplacée : ${L.length} produits.\nQuantité totale en stock : ${f(L.reduce((a,p)=>a+p.stock,0),0)}\nValeur du stock : ${f(L.reduce((a,p)=>a+val(p),0))} DT${dup?`\n${dup} code(s) en double renommé(s) avec un suffixe (-2, -3…).`:''}`);
   }else{
    let add=0,skip=0;L.forEach(p=>{if(P(p.code)){skip++;return}S.products.push(p);addPrices(p);mv(p.code,'Import liste',p.stock,file.name);add++});
-   save();alert(`${add} produit(s) ajouté(s).${skip?`\n${skip} déjà existant(s) (ignoré(s)).`:''}${dup?`\n${dup} doublon(s) dans le fichier ignoré(s).`:''}`);
+   save();alert(`${add} produit(s) ajouté(s).${skip?`\n${skip} déjà existant(s) (ignoré(s)).`:''}${dup?`\n${dup} code(s) en double renommé(s) avec un suffixe.`:''}`);
   }
   go()}catch(e){alert('Lecture du fichier impossible : '+e.message)}};
  r.readAsArrayBuffer(file)}
