@@ -62,7 +62,7 @@ async function init(){
   S.products.forEach(p=>{if(p.sup)S.prices.push({code:p.code,sup:p.sup,price:p.last||p.buy,d:'import'})});
   save();
  }
- $('#nav').innerHTML='<h1>🏍️ Matmata Moto Store</h1>'+PAGES.map(([k,t])=>`<a href="#${k}" data-k="${k}">${t}</a>`).join('');
+ $('#nav').innerHTML='<h1>🏍️ Matmata Moto Store</h1><div style="margin:-8px 8px 10px;font-size:11px;color:var(--mu)">version 3 · 10/10/2026</div>'+PAGES.map(([k,t])=>`<a href="#${k}" data-k="${k}">${t}</a>`).join('');
  addEventListener('hashchange',route);route();
 }
 function route(){
@@ -104,7 +104,7 @@ function matchP(p,fld,q){q=q.trim().toLowerCase();if(!q)return true;return Strin
 R.prod=()=>{pg.prod=pg.prod||{fld:'name',q:'',n:50};return`<h2>Gestion des produits</h2><div class="bar">
  <select id="pf">${Object.entries(FIELDS).map(([k,v])=>`<option value="${k}" ${pg.prod.fld===k?'selected':''}>${v}</option>`).join('')}</select>
  <input type="search" id="pq" placeholder="Rechercher…" value="${esc(pg.prod.q)}"><button class="p" onclick="formP()">+ Ajouter un produit</button><button class="p" onclick="formA()">📥 Nouvel arrivage</button></div>
- <div class="bar"><button onclick="exportX()">⬇ Télécharger la liste (Excel)</button><button onclick="pickX('add')">⬆ Ajouter une liste</button><button class="d" onclick="pickX('replace')">⇄ Remplacer la liste</button>
+ <div class="bar"><button onclick="exportX()">⬇ Télécharger la liste (Excel)</button><button class="p" onclick="pickX('add')">📋 Remplir le tableau (Excel)</button><button class="d" onclick="delAll()">🗑 Supprimer tous les produits</button>
  <input type="file" id="xf" accept=".xlsx,.xls,.csv" hidden onchange="importX(this)"></div><div class="c tw" id="pt"></div>`};
 A.prod=()=>{const g=pg.prod;
  $('#pf').onchange=e=>{g.fld=e.target.value;g.n=50;tp()};$('#pq').oninput=e=>{g.q=e.target.value;g.n=50;tp()};tp()};
@@ -144,6 +144,12 @@ function exportX(){if(needX())return;
  const d=S.products.map(p=>({'Code article':p.code,'Désignation':p.name,'Catégorie':p.cat,"Prix d'achat":p.buy,'Prix de vente':p.sell,'Quantité':p.stock,"Seuil d'alerte":p.thr,'Fournisseur':p.sup,"Dernier prix d'achat":p.last||''}));
  const ws=XLSX.utils.json_to_sheet(d),wb=XLSX.utils.book_new();ws['!cols']=[{wch:16},{wch:40},{wch:18},{wch:12},{wch:12},{wch:10},{wch:12},{wch:22}];
  XLSX.utils.book_append_sheet(wb,ws,'Produits');XLSX.writeFile(wb,'produits-'+today()+'.xlsx')}
+function delAll(){const n=S.products.length;
+ if(!n)return alert('Le tableau des produits est déjà vide.');
+ if(!confirm(`Supprimer les ${n} produits (avec leurs prix fournisseurs et mouvements) ?\n\nUne sauvegarde JSON va être téléchargée automatiquement avant la suppression.\nLes ventes déjà enregistrées sont conservées.`))return;
+ if(!confirm('Dernière confirmation : vider complètement le tableau des produits ?'))return;
+ try{exportJ()}catch(e){}
+ S.products=[];S.prices=[];S.mvts=[];save();alert('Tous les produits ont été supprimés. Utilisez « Remplir le tableau (Excel) » pour importer la nouvelle liste.');go()}
 let xMode='add';
 function pickX(m){xMode=m;const i=$('#xf');i.value='';i.click()}
 const XA={code:['code','sku','reference','ref'],name:['designation','libelle','nomproduit','nomarticle','nom','article'],cat:['categorie','category','famille'],
@@ -173,8 +179,8 @@ function importX(inp){const file=inp.files[0];if(!file||needX())return;const r=n
    S.products=L;S.prices=[];L.forEach(addPrices);S.mvts.push({d:now(),code:'—',type:'Remplacement liste',qty:L.length,note:file.name});
    save();alert(`Liste remplacée : ${L.length} produits.\nQuantité totale en stock : ${f(L.reduce((a,p)=>a+p.stock,0),0)}\nValeur du stock : ${f(L.reduce((a,p)=>a+val(p),0))} DT${dup?`\n${dup} code(s) en double renommé(s) avec un suffixe (-2, -3…).`:''}`);
   }else{
-   let add=0,skip=0;L.forEach(p=>{if(P(p.code)){skip++;return}S.products.push(p);addPrices(p);mv(p.code,'Import liste',p.stock,file.name);add++});
-   save();alert(`${add} produit(s) ajouté(s).${skip?`\n${skip} déjà existant(s) (ignoré(s)).`:''}${dup?`\n${dup} code(s) en double renommé(s) avec un suffixe.`:''}`);
+   const before=S.products.length;let add=0,skip=0;L.forEach(p=>{if(P(p.code)){skip++;return}S.products.push(p);addPrices(p);mv(p.code,'Import liste',p.stock,file.name);add++});
+   save();alert(`${add} produit(s) ajouté(s).\nTotal : ${S.products.length} produits · quantité en stock ${f(S.products.reduce((a,p)=>a+p.stock,0),0)} · valeur du stock ${f(S.products.reduce((a,p)=>a+val(p),0))} DT${before?'\n(Le tableau n\'était pas vide : les codes déjà présents ont été conservés tels quels. Pour repartir de zéro, supprimez d\'abord tous les produits.)':''}\n${skip?`\n${skip} déjà existant(s) (ignoré(s)).`:''}${dup?`\n${dup} code(s) en double renommé(s) avec un suffixe.`:''}`);
   }
   go()}catch(e){alert('Lecture du fichier impossible : '+e.message)}};
  r.readAsArrayBuffer(file)}
