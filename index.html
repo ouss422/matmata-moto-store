@@ -1664,125 +1664,125 @@ function buildOrderDialogHtml() {
 '<div class="msg" id="msg"></div>' +
 '<button class="bc" onclick="google.script.host.close()">Fermer</button>' +
 '</div>' +
-'<script>(' + orderDialogClient_.toString() + ')();<\/script></body></html>';
+'<script>' + orderDialogScript_() + '<\/script></body></html>';
 }
 
-/** Script client du dialogue Commande (injecté tel quel dans la page). */
-function orderDialogClient_() {
-  var prodList = [], cart = [], curCode = "", curDesig = "", curSup = [], orderId = "";
-  function $(id) { return document.getElementById(id); }
-  function norm(s) { return (s || "").toString().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, ""); }
-  function esc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
-  function showMsg(t, cls) { var el = $("msg"); el.textContent = t; el.className = "msg " + cls; }
-
-  window.onSrch = function (showAll) {
-    var q = norm($("sprod").value.trim()), ac = $("aclist");
-    if (!q && !showAll) { ac.innerHTML = ""; return; }
-    var m = [];
-    for (var i = 0; i < prodList.length && m.length < 30; i++) {
-      var p = prodList[i];
-      if (!q || norm(p.code).indexOf(q) >= 0 || norm(p.designation).indexOf(q) >= 0) m.push(i);
-    }
-    ac.innerHTML = m.map(function (i) {
-      return '<div class="aci" data-i="' + i + '" onclick="pickProd(this)">' + esc(prodList[i].code) + ' — ' + esc(prodList[i].designation) + '</div>';
-    }).join("") || '<div class="aci">Aucun résultat</div>';
-  };
-  window.pickProd = function (el) {
-    var p = prodList[parseInt(el.getAttribute("data-i"))];
-    $("aclist").innerHTML = "";
-    $("sprod").value = p.code;
-    curCode = p.code; curDesig = p.designation;
-    $("cmpZone").innerHTML = "Chargement des fournisseurs...";
-    google.script.run.withSuccessHandler(renderCmp)
-      .withFailureHandler(function (e) { $("cmpZone").textContent = "Erreur : " + e.message; })
-      .getSuppliersForProduct(p.code);
-  };
-  function renderCmp(list) {
-    curSup = list || [];
-    var z = $("cmpZone");
-    if (!curSup.length) { z.innerHTML = '<p class="hint">Aucun fournisseur enregistré pour ce produit. Ajoutez-en via 👤 Ajouter un Client / Fournisseur.</p>'; return; }
-    var rows = "";
-    for (var i = 0; i < curSup.length; i++) {
-      var f = curSup[i];
-      rows += '<tr class="' + (i === 0 ? "best" : "") + '"><td>' + (i === 0 ? "🥇 " : "") + esc(f.nom) + '</td><td>' + Number(f.prixFournisseur).toFixed(3) +
-        ' DT</td><td><input type="number" id="q' + i + '" value="1" min="1" style="width:60px"></td>' +
-        '<td><button class="bo" data-idx="' + i + '" onclick="addCart(this)">➕ Ajouter au panier</button></td></tr>';
-    }
-    z.innerHTML = '<p class="hint">Prix d\'achat par fournisseur, du moins cher (🥇) au plus cher :</p><table><thead><tr><th>Fournisseur</th><th>Prix d\'Achat</th><th>Qté</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
-  }
-  window.addCart = function (btn) {
-    var f = curSup[parseInt(btn.getAttribute("data-idx"))];
-    var q = parseInt($("q" + btn.getAttribute("data-idx")).value) || 1;
-    if (q < 1) q = 1;
-    var found = false;
-    for (var i = 0; i < cart.length; i++) {
-      if (cart[i].code === curCode && cart[i].fournisseur === f.nom) { cart[i].qte += q; found = true; break; }
-    }
-    if (!found) cart.push({ code: curCode, designation: curDesig, fournisseur: f.nom, prix: Number(f.prixFournisseur), qte: q });
-    orderId = "";
-    renderCart();
-    showMsg("🧺 " + curDesig + " ajouté au panier (" + q + " × " + f.nom + ").", "s");
-  };
-  window.setQty = function (i, v) {
-    var q = parseInt(v) || 1; cart[i].qte = q < 1 ? 1 : q; orderId = ""; renderCart();
-  };
-  window.delLine = function (i) { cart.splice(i, 1); orderId = ""; renderCart(); };
-  window.clearCart = function () { cart = []; orderId = ""; renderCart(); };
-  function total() { var t = 0; cart.forEach(function (l) { t += l.prix * l.qte; }); return t; }
-  function renderCart() {
-    var z = $("cartZone");
-    if (!cart.length) { z.innerHTML = '<p class="hint">Le panier est vide. Recherchez un produit puis cliquez sur « ➕ Ajouter au panier ».</p>'; return; }
-    var rows = cart.map(function (l, i) {
-      return '<tr><td>' + esc(l.code) + '</td><td>' + esc(l.designation) + '</td><td>' + esc(l.fournisseur) + '</td><td>' + l.prix.toFixed(3) +
-        '</td><td><input type="number" min="1" value="' + l.qte + '" style="width:58px" onchange="setQty(' + i + ',this.value)"></td><td>' +
-        (l.prix * l.qte).toFixed(3) + '</td><td><button class="bx" title="Retirer" onclick="delLine(' + i + ')">✕</button></td></tr>';
-    }).join("");
-    z.innerHTML = '<table><thead><tr><th>Code</th><th>Désignation</th><th>Fournisseur</th><th>Prix</th><th>Qté</th><th>Total</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' +
-      '<div class="tot">Total : ' + total().toFixed(3) + ' DT' + (orderId ? ' — N° ' + esc(orderId) : '') + '</div>' +
-      '<div class="acts"><button class="v" id="bV" onclick="validateCart()">✅ Valider la commande</button>' +
-      '<button class="p" id="bP" onclick="printCart()">🖨️ Imprimer</button>' +
-      '<button class="d" id="bD" onclick="pdfCart()">📄 Télécharger PDF</button></div>' +
-      '<p class="hint" style="text-align:right"><a href="#" onclick="clearCart();return false">Vider le panier</a></p>';
-  }
-  function busy(on) { ["bV", "bP", "bD"].forEach(function (id) { if ($(id)) $(id).disabled = on; }); }
-  window.validateCart = function () {
-    if (!cart.length) return;
-    busy(true);
-    google.script.run.withSuccessHandler(function (r) {
-      orderId = r.id; renderCart();
-      showMsg("✅ Commande " + r.id + " enregistrée (" + r.count + " ligne(s), " + r.total.toFixed(3) + " DT) dans « Page 8 : Commandes ».", "s");
-    }).withFailureHandler(function (e) { busy(false); showMsg("Erreur : " + e.message, "e"); }).createOrderCart(cart);
-  };
-  window.printCart = function () {
-    if (!cart.length) return;
-    busy(true);
-    google.script.run.withSuccessHandler(function (html) {
-      busy(false);
-      var w = null;
-      try { w = window.open("", "_blank"); } catch (e) {}
-      if (!w) { showMsg("Impression bloquée par le navigateur : utilisez « Télécharger PDF » puis imprimez le PDF.", "e"); return; }
-      w.document.open(); w.document.write(html); w.document.close();
-      setTimeout(function () { try { w.focus(); w.print(); } catch (e) {} }, 400);
-    }).withFailureHandler(function (e) { busy(false); showMsg("Erreur : " + e.message, "e"); }).getOrderPrintHtml(cart, orderId);
-  };
-  window.pdfCart = function () {
-    if (!cart.length) return;
-    busy(true);
-    google.script.run.withSuccessHandler(function (r) {
-      busy(false);
-      var a = document.createElement("a");
-      a.href = "data:application/pdf;base64," + r.b64; a.download = r.name;
-      document.body.appendChild(a); a.click(); document.body.removeChild(a);
-      showMsg("📄 PDF généré : " + r.name, "s");
-    }).withFailureHandler(function (e) { busy(false); showMsg("Erreur PDF : " + e.message, "e"); }).getOrderPdf(cart, orderId);
-  };
-  window.onload = function () {
-    google.script.run.withSuccessHandler(function (l) { prodList = l || []; }).getAllProducts();
-    document.addEventListener("click", function (ev) {
-      if (!ev.target.closest("#sprod") && !ev.target.closest("#aclist")) $("aclist").innerHTML = "";
-    });
-    renderCart();
-  };
+function orderDialogScript_() {
+  return '' +
+'var prodList = [], cart = [], curCode = "", curDesig = "", curSup = [], orderId = "";' +
+'function $(id) { return document.getElementById(id); }' +
+'function norm(s) { return (s || "").toString().toLowerCase().normalize("NFD").replace(/[\\u0300-\\u036f]/g, ""); }' +
+'function esc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }' +
+'function showMsg(t, cls) { var el = $("msg"); el.textContent = t; el.className = "msg " + cls; }' +
+'window.onSrch = function (showAll) {' +
+'var q = norm($("sprod").value.trim()), ac = $("aclist");' +
+'if (!q && !showAll) { ac.innerHTML = ""; return; }' +
+'var m = [];' +
+'for (var i = 0; i < prodList.length && m.length < 30; i++) {' +
+'var p = prodList[i];' +
+'if (!q || norm(p.code).indexOf(q) >= 0 || norm(p.designation).indexOf(q) >= 0) m.push(i);' +
+'}' +
+'ac.innerHTML = m.map(function (i) {' +
+'return \'<div class="aci" data-i="\' + i + \'" onclick="pickProd(this)">\' + esc(prodList[i].code) + \' — \' + esc(prodList[i].designation) + \'</div>\';' +
+'}).join("") || \'<div class="aci">Aucun résultat</div>\';' +
+'};' +
+'window.pickProd = function (el) {' +
+'var p = prodList[parseInt(el.getAttribute("data-i"))];' +
+'$("aclist").innerHTML = "";' +
+'$("sprod").value = p.code;' +
+'curCode = p.code; curDesig = p.designation;' +
+'$("cmpZone").innerHTML = "Chargement des fournisseurs...";' +
+'google.script.run.withSuccessHandler(renderCmp)' +
+'.withFailureHandler(function (e) { $("cmpZone").textContent = "Erreur : " + e.message; })' +
+'.getSuppliersForProduct(p.code);' +
+'};' +
+'function renderCmp(list) {' +
+'curSup = list || [];' +
+'var z = $("cmpZone");' +
+'if (!curSup.length) { z.innerHTML = \'<p class="hint">Aucun fournisseur enregistré pour ce produit. Ajoutez-en via 👤 Ajouter un Client / Fournisseur.</p>\'; return; }' +
+'var rows = "";' +
+'for (var i = 0; i < curSup.length; i++) {' +
+'var f = curSup[i];' +
+'rows += \'<tr class="\' + (i === 0 ? "best" : "") + \'"><td>\' + (i === 0 ? "🥇 " : "") + esc(f.nom) + \'</td><td>\' + Number(f.prixFournisseur).toFixed(3) +' +
+'\' DT</td><td><input type="number" id="q\' + i + \'" value="1" min="1" style="width:60px"></td>\' +' +
+'\'<td><button class="bo" data-idx="\' + i + \'" onclick="addCart(this)">➕ Ajouter au panier</button></td></tr>\';' +
+'}' +
+'z.innerHTML = \'<p class="hint">Prix d\\\'achat par fournisseur, du moins cher (🥇) au plus cher :</p><table><thead><tr><th>Fournisseur</th><th>Prix d\\\'Achat</th><th>Qté</th><th></th></tr></thead><tbody>\' + rows + \'</tbody></table>\';' +
+'}' +
+'window.addCart = function (btn) {' +
+'var f = curSup[parseInt(btn.getAttribute("data-idx"))];' +
+'var q = parseInt($("q" + btn.getAttribute("data-idx")).value) || 1;' +
+'if (q < 1) q = 1;' +
+'var found = false;' +
+'for (var i = 0; i < cart.length; i++) {' +
+'if (cart[i].code === curCode && cart[i].fournisseur === f.nom) { cart[i].qte += q; found = true; break; }' +
+'}' +
+'if (!found) cart.push({ code: curCode, designation: curDesig, fournisseur: f.nom, prix: Number(f.prixFournisseur), qte: q });' +
+'orderId = "";' +
+'renderCart();' +
+'showMsg("🧺 " + curDesig + " ajouté au panier (" + q + " × " + f.nom + ").", "s");' +
+'};' +
+'window.setQty = function (i, v) {' +
+'var q = parseInt(v) || 1; cart[i].qte = q < 1 ? 1 : q; orderId = ""; renderCart();' +
+'};' +
+'window.delLine = function (i) { cart.splice(i, 1); orderId = ""; renderCart(); };' +
+'window.clearCart = function () { cart = []; orderId = ""; renderCart(); };' +
+'function total() { var t = 0; cart.forEach(function (l) { t += l.prix * l.qte; }); return t; }' +
+'function renderCart() {' +
+'var z = $("cartZone");' +
+'if (!cart.length) { z.innerHTML = \'<p class="hint">Le panier est vide. Recherchez un produit puis cliquez sur « ➕ Ajouter au panier ».</p>\'; return; }' +
+'var rows = cart.map(function (l, i) {' +
+'return \'<tr><td>\' + esc(l.code) + \'</td><td>\' + esc(l.designation) + \'</td><td>\' + esc(l.fournisseur) + \'</td><td>\' + l.prix.toFixed(3) +' +
+'\'</td><td><input type="number" min="1" value="\' + l.qte + \'" style="width:58px" onchange="setQty(\' + i + \',this.value)"></td><td>\' +' +
+'(l.prix * l.qte).toFixed(3) + \'</td><td><button class="bx" title="Retirer" onclick="delLine(\' + i + \')">✕</button></td></tr>\';' +
+'}).join("");' +
+'z.innerHTML = \'<table><thead><tr><th>Code</th><th>Désignation</th><th>Fournisseur</th><th>Prix</th><th>Qté</th><th>Total</th><th></th></tr></thead><tbody>\' + rows + \'</tbody></table>\' +' +
+'\'<div class="tot">Total : \' + total().toFixed(3) + \' DT\' + (orderId ? \' — N° \' + esc(orderId) : \'\') + \'</div>\' +' +
+'\'<div class="acts"><button class="v" id="bV" onclick="validateCart()">✅ Valider la commande</button>\' +' +
+'\'<button class="p" id="bP" onclick="printCart()">🖨️ Imprimer</button>\' +' +
+'\'<button class="d" id="bD" onclick="pdfCart()">📄 Télécharger PDF</button></div>\' +' +
+'\'<p class="hint" style="text-align:right"><a href="#" onclick="clearCart();return false">Vider le panier</a></p>\';' +
+'}' +
+'function busy(on) { ["bV", "bP", "bD"].forEach(function (id) { if ($(id)) $(id).disabled = on; }); }' +
+'window.validateCart = function () {' +
+'if (!cart.length) return;' +
+'busy(true);' +
+'google.script.run.withSuccessHandler(function (r) {' +
+'orderId = r.id; renderCart();' +
+'showMsg("✅ Commande " + r.id + " enregistrée (" + r.count + " ligne(s), " + r.total.toFixed(3) + " DT) dans « Page 8 : Commandes ».", "s");' +
+'}).withFailureHandler(function (e) { busy(false); showMsg("Erreur : " + e.message, "e"); }).createOrderCart(cart);' +
+'};' +
+'window.printCart = function () {' +
+'if (!cart.length) return;' +
+'busy(true);' +
+'google.script.run.withSuccessHandler(function (html) {' +
+'busy(false);' +
+'var w = null;' +
+'try { w = window.open("", "_blank"); } catch (e) {}' +
+'if (!w) { showMsg("Impression bloquée par le navigateur : utilisez « Télécharger PDF » puis imprimez le PDF.", "e"); return; }' +
+'w.document.open(); w.document.write(html); w.document.close();' +
+'setTimeout(function () { try { w.focus(); w.print(); } catch (e) {} }, 400);' +
+'}).withFailureHandler(function (e) { busy(false); showMsg("Erreur : " + e.message, "e"); }).getOrderPrintHtml(cart, orderId);' +
+'};' +
+'window.pdfCart = function () {' +
+'if (!cart.length) return;' +
+'busy(true);' +
+'google.script.run.withSuccessHandler(function (r) {' +
+'busy(false);' +
+'var a = document.createElement("a");' +
+'a.href = "data:application/pdf;base64," + r.b64; a.download = r.name;' +
+'document.body.appendChild(a); a.click(); document.body.removeChild(a);' +
+'showMsg("📄 PDF généré : " + r.name, "s");' +
+'}).withFailureHandler(function (e) { busy(false); showMsg("Erreur PDF : " + e.message, "e"); }).getOrderPdf(cart, orderId);' +
+'};' +
+'window.onload = function () {' +
+'google.script.run.withSuccessHandler(function (l) { prodList = l || []; }).getAllProducts();' +
+'document.addEventListener("click", function (ev) {' +
+'if (!ev.target.closest("#sprod") && !ev.target.closest("#aclist")) $("aclist").innerHTML = "";' +
+'});' +
+'renderCart();' +
+'};' +
+  '';
 }
 
 /** Crée toutes les lignes du panier sous UN SEUL numéro de commande. */
