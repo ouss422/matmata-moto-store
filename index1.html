@@ -1,0 +1,2553 @@
+// ============================================================
+//  VOTRE BOUTIQUE — Google Apps Script
+//  Version : 9.0 — Fournisseurs, Clients, Commandes & Comparateur de Prix
+// ============================================================
+
+const SHEET_DASHBOARD  = "Page 1 : Tableau de Bord";
+const SHEET_PRODUCTS   = "Page 2 : Produits";
+const SHEET_SALES      = "Page 3 : Ventes";
+const SHEET_REPORTS    = "Page 4 : Rapports";
+const SHEET_DAILY      = "Page 5 : Suivi Journalier";
+const SHEET_SUPPLIERS  = "Page 6 : Fournisseurs";
+const SHEET_CLIENTS    = "Page 7 : Clients";
+const SHEET_ORDERS     = "Page 8 : Commandes";
+
+const COLOR_HEADER_BG   = "#1A237E";
+const COLOR_HEADER_TEXT = "#FFFFFF";
+const COLOR_ACCENT      = "#FF6F00";
+const COLOR_ALT_ROW     = "#E8EAF6";
+const COLOR_ALERT_BG    = "#FFEBEE";
+const COLOR_OK_BG       = "#E8F5E9";
+const COLOR_KPI_BG      = "#E3F2FD";
+
+
+// ============================================================
+//  1. MENU
+// ============================================================
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("🛠️ Votre Boutique")
+    .addItem("⚙️  Initialiser l'application",    "setupApplication")
+    .addSeparator()
+    .addItem("➕  Ajouter / Modifier un Produit", "showAddProductDialog")
+    .addItem("🛒  Enregistrer une Vente",          "showAddSaleDialog")
+    .addItem("🔄  Actualiser le Tableau de Bord", "refreshDashboard")
+    .addSeparator()
+    .addItem("👤  Ajouter un Client / Fournisseur", "showAddClientSupplierDialog")
+    .addItem("📦  Créer une Commande Fournisseur",  "showOrderDialog")
+    .addItem("🛒  Créer commande depuis les alertes", "showOrderFromAlertsDialog")
+    .addSeparator()
+    .addItem("❌  Annuler une Vente",              "showCancelSaleDialog")
+    .addItem("📅  Voir le Suivi Journalier",       "goToDailySheet")
+    .addSeparator()
+    .addItem("📊  Générer le Rapport Mensuel",    "generateMonthlyReport")
+    .addItem("🔁  Recalculer les colonnes Ventes", "recalculateSalesRowsMenu")
+    .addItem("🔧  Installer les déclencheurs",    "installTriggers")
+    .addToUi();
+}
+
+
+// ============================================================
+//  2. DÉCLENCHEURS
+// ============================================================
+function installTriggers() {
+  ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger("onEditTrigger")
+    .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet()).onEdit().create();
+  ScriptApp.newTrigger("onChangeTrigger")
+    .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet()).onChange().create();
+  SpreadsheetApp.getUi().alert("✅  Déclencheurs installés !\nLe Tableau de Bord se mettra à jour automatiquement.");
+}
+
+function onEditTrigger(e) {
+  if (!e) return;
+  const sheet = e.range.getSheet();
+  const sheetName = sheet.getName();
+  if (sheetName === SHEET_SALES) {
+    const col = e.range.getColumn();
+    const row = e.range.getRow();
+    if (row <= 1) return;
+
+    if (col === 3 || col === 6) {
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      const s  = ss.getSheetByName(SHEET_SALES);
+      const code = s.getRange(row, 3).getValue();
+
+      if (code) {
+        if (col === 3) {
+          if (!s.getRange(row, 1).getValue()) s.getRange(row, 1).setValue(generateSaleId(s));
+          if (!s.getRange(row, 2).getValue()) s.getRange(row, 2).setValue(new Date()).setNumberFormat("DD/MM/YYYY");
+        }
+        const prodSheet = ss.getSheetByName(SHEET_PRODUCTS);
+        const prodData = prodSheet.getDataRange().getValues();
+        let prod = null;
+        for (let i = 1; i < prodData.length; i++) {
+          if (String(prodData[i][0]) === String(code)) {
+            prod = {
+              designation: String(prodData[i][1]),
+              prixAchat:   Number(prodData[i][3]) || 0,
+              prixVente:   Number(prodData[i][4]) || 0
+            };
+            break;
+          }
+        }
+        if (prod) {
+          const qte    = Number(s.getRange(row, 6).getValue()) || 0;
+          const total  = prod.prixVente * qte;
+          const profit = (prod.prixVente - prod.prixAchat) * qte;
+          s.getRange(row, 4).setValue(prod.designation);
+          s.getRange(row, 5).setValue(prod.prixVente).setNumberFormat('#,##0.000 " DT"');
+          s.getRange(row, 7).setValue(total).setNumberFormat('#,##0.000 " DT"');
+          s.getRange(row, 9).setValue(profit).setNumberFormat('#,##0.000 " DT"');
+        } else {
+          s.getRange(row, 4).setValue("Produit inconnu");
+          s.getRange(row, 5).setValue(0);
+          s.getRange(row, 7).setValue(0);
+          s.getRange(row, 9).setValue(0);
+        }
+      }
+    }
+  }
+  if (sheetName === SHEET_PRODUCTS || sheetName === SHEET_SALES)
+    updateDashboardValues();
+}
+
+function onChangeTrigger() {
+  updateDashboardValues();
+}
+
+
+// ============================================================
+//  3. MOTEUR TABLEAU DE BORD
+// ============================================================
+function updateDashboardValues() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const dbSheet   = ss.getSheetByName(SHEET_DASHBOARD);
+  const prodSheet = ss.getSheetByName(SHEET_PRODUCTS);
+  const salesSheet= ss.getSheetByName(SHEET_SALES);
+  if (!dbSheet || !prodSheet || !salesSheet) return;
+
+  const prodData  = prodSheet.getDataRange().getValues();
+
+  // ★ Construire qteVendueMap en excluant les ventes ANNULÉES (col K = "ANNULÉ")
+  const salesDataForStock = salesSheet.getDataRange().getValues();
+  const qteVendueMap = {};
+  for (let i = 1; i < salesDataForStock.length; i++) {
+    const r = salesDataForStock[i];
+    if (!r[2]) continue;
+    // ★ Ignorer les lignes annulées (col K, index 10)
+    if (String(r[10]).trim().toUpperCase() === "ANNULÉ") continue;
+    const code = String(r[2]);
+    qteVendueMap[code] = (qteVendueMap[code] || 0) + (Number(r[5]) || 0);
+  }
+
+  let valeurStock = 0, nbProduits = 0, nbAlertes = 0;
+  const alertRows = [];
+  const prixAchatMap = {};
+
+  for (let i = 1; i < prodData.length; i++) {
+    const r = prodData[i];
+    if (!r[0]) continue;
+    nbProduits++;
+    const code        = String(r[0]);
+    const prixAchat   = Number(r[3]) || 0;
+    const prixVente   = Number(r[4]) || 0;
+    const stockInitial= Number(r[5]) || 0;
+    const seuil       = Number(r[8]) || 0;
+    const stockActuel = stockInitial - (qteVendueMap[code] || 0);
+    prixAchatMap[code] = prixAchat;
+    valeurStock += prixAchat * Math.max(stockActuel, 0);
+    if (stockActuel <= seuil) {
+      nbAlertes++;
+      alertRows.push([code, String(r[1]), String(r[2]), stockActuel, seuil, "⚠️ ALERTE"]);
+    }
+  }
+
+  // ── Ventes (hors annulées) ──
+  const today = new Date(); today.setHours(0,0,0,0);
+  let caGlobal = 0, ventesJour = 0, profitJour = 0;
+  const topMap = {};
+
+  for (let i = 1; i < salesDataForStock.length; i++) {
+    const r = salesDataForStock[i];
+    if (!r[2]) continue;
+    // ★ Ignorer les ventes annulées dans les KPIs
+    if (String(r[10]).trim().toUpperCase() === "ANNULÉ") continue;
+    const code    = String(r[2]);
+    const desig   = String(r[3]) || code;
+    const prixU   = Number(r[4]) || 0;
+    const qte     = Number(r[5]) || 0;
+    const total   = prixU * qte;
+    const profit  = (prixU - (prixAchatMap[code]||0)) * qte;
+    caGlobal += total;
+    if (r[1]) {
+      const d = new Date(r[1]); d.setHours(0,0,0,0);
+      if (d.getTime() === today.getTime()) {
+        ventesJour += total;
+        profitJour += profit;
+      }
+    }
+    if (!topMap[code]) topMap[code] = { designation:desig, qty:0, ca:0, profit:0 };
+    topMap[code].qty    += qte;
+    topMap[code].ca     += total;
+    topMap[code].profit += profit;
+  }
+
+  const top5 = Object.entries(topMap)
+    .sort((a,b) => b[1].ca - a[1].ca).slice(0,5)
+    .map(([code,v]) => [code, v.designation, v.qty, v.ca]);
+
+  // ── Classement par Quantité Vendue (Top 10) ──
+  const rankQty = Object.entries(topMap)
+    .sort((a,b) => b[1].qty - a[1].qty).slice(0,10)
+    .map(([code,v]) => [code, v.designation, v.qty, v.ca]);
+
+  // ── Classement par Profit Réalisé (Top 10) ──
+  const rankProfit = Object.entries(topMap)
+    .sort((a,b) => b[1].profit - a[1].profit).slice(0,10)
+    .map(([code,v]) => [code, v.designation, v.qty, v.profit]);
+
+  // ── Écriture KPI ──
+  dbSheet.getRange("A6").setValue(valeurStock).setNumberFormat('#,##0.000 " DT"');
+  dbSheet.getRange("B6").setValue(caGlobal).setNumberFormat('#,##0.000 " DT"');
+  dbSheet.getRange("C6").setValue(ventesJour).setNumberFormat('#,##0.000 " DT"');
+  dbSheet.getRange("D6").setValue(profitJour).setNumberFormat('#,##0.000 " DT"');
+  dbSheet.getRange("E6").setValue(nbProduits).setNumberFormat("#,##0");
+  dbSheet.getRange("F6").setValue(nbAlertes).setNumberFormat("#,##0");
+  dbSheet.getRange("F6").setBackground(nbAlertes>0?"#FFCDD2":"#E8F5E9").setFontColor(nbAlertes>0?"#B71C1C":"#2E7D32");
+  dbSheet.getRange("D6").setFontColor(profitJour>=0?"#1B5E20":"#B71C1C");
+
+  // ── Enregistrement Suivi Journalier ──
+  // Crée la sheet si elle n'existe pas, puis upsert la ligne du jour
+  let dailySheet = ss.getSheetByName(SHEET_DAILY);
+  if (!dailySheet) { setupDailySheet(ss); dailySheet = ss.getSheetByName(SHEET_DAILY); }
+
+  // Compter le nb de transactions du jour (ventes actives uniquement)
+  let nbVentesJour = 0;
+  for (let i = 1; i < salesDataForStock.length; i++) {
+    const r = salesDataForStock[i];
+    if (!r[2] || String(r[10]).trim().toUpperCase() === "ANNULÉ") continue;
+    if (r[1]) {
+      const d = new Date(r[1]); d.setHours(0,0,0,0);
+      if (d.getTime() === today.getTime()) nbVentesJour++;
+    }
+  }
+
+  // Chercher si une ligne existe déjà pour aujourd'hui
+  const todayStr = Utilities.formatDate(today, Session.getScriptTimeZone(), "dd/MM/yyyy");
+  const lastDailyRow = dailySheet.getLastRow();
+  let foundRow = -1;
+  if (lastDailyRow >= 4) {
+    const dateCol = dailySheet.getRange(4, 1, lastDailyRow - 3, 1).getValues();
+    for (let i = 0; i < dateCol.length; i++) {
+      if (dateCol[i][0]) {
+        const cellStr = Utilities.formatDate(new Date(dateCol[i][0]), Session.getScriptTimeZone(), "dd/MM/yyyy");
+        if (cellStr === todayStr) { foundRow = i + 4; break; }
+      }
+    }
+  }
+
+  const targetRow = foundRow > 0 ? foundRow : (lastDailyRow < 4 ? 4 : lastDailyRow + 1);
+  dailySheet.getRange(targetRow, 1).setValue(today).setNumberFormat("DD/MM/YYYY");
+  dailySheet.getRange(targetRow, 2).setValue(ventesJour).setNumberFormat('#,##0.000 " DT"');
+  dailySheet.getRange(targetRow, 3).setValue(profitJour).setNumberFormat('#,##0.000 " DT"');
+  dailySheet.getRange(targetRow, 4).setValue(nbVentesJour).setNumberFormat("#,##0");
+  // Style de la ligne
+  dailySheet.getRange(targetRow, 3).setFontColor(profitJour >= 0 ? "#1B5E20" : "#B71C1C").setFontWeight("bold");
+  dailySheet.getRange(targetRow, 1, 1, 4)
+    .setBorder(true,true,true,true,true,true,"#CFD8DC",SpreadsheetApp.BorderStyle.SOLID);
+  // Mettre en surbrillance la ligne du jour
+  dailySheet.getRange(targetRow, 1, 1, 4).setBackground("#FFF8E1").setFontWeight("bold");
+  // Remettre les autres lignes en style normal (enlever le surlignage du jour précédent)
+  if (lastDailyRow >= 4) {
+    for (let i = 4; i <= dailySheet.getLastRow(); i++) {
+      if (i !== targetRow) {
+        const bg = (i % 2 === 0) ? COLOR_ALT_ROW : "#FFFFFF";
+        dailySheet.getRange(i, 1, 1, 4).setBackground(bg).setFontWeight("normal");
+        const p = dailySheet.getRange(i, 3).getValue();
+        dailySheet.getRange(i, 3).setFontColor(p >= 0 ? "#1B5E20" : "#B71C1C").setFontWeight("normal");
+      }
+    }
+  }
+
+  // ── Top 5 (lignes 10-14) ──
+  dbSheet.getRange("A10:D14").clearContent().setBackground(null).setFontColor(null).setFontWeight("normal").setFontStyle("normal");
+  try { dbSheet.getRange("A10:D10").breakApart(); } catch(e){}
+  if (top5.length === 0) {
+    dbSheet.getRange("A10:D10").merge()
+      .setValue("Aucune vente enregistrée.").setFontColor("#90A4AE").setFontStyle("italic").setHorizontalAlignment("center");
+  } else {
+    const medals = ["🥇","🥈","🥉"];
+    top5.forEach((row, i) => {
+      const r = 10 + i;
+      const prefix = medals[i] ? medals[i]+" " : "";
+      dbSheet.getRange(r,1).setValue(prefix + row[0]);
+      dbSheet.getRange(r,2).setValue(row[1]);
+      dbSheet.getRange(r,3).setValue(row[2]).setNumberFormat("#,##0");
+      dbSheet.getRange(r,4).setValue(row[3]).setNumberFormat('#,##0.000 " DT"');
+      dbSheet.getRange(r,1,1,4).setBackground(i%2===0?"#FFFFFF":"#E8EAF6");
+    });
+  }
+
+  // ── Classement par Quantité Vendue (lignes 18-27) ──
+  dbSheet.getRange("A18:F27").clearContent().setBackground(null).setFontColor(null)
+    .setFontWeight("normal").setFontStyle("normal");
+  try { dbSheet.getRange("A18:F18").breakApart(); } catch(e){}
+
+  if (rankQty.length === 0) {
+    dbSheet.getRange("A18:F18").merge()
+      .setValue("Aucune vente enregistrée.").setFontColor("#90A4AE")
+      .setFontStyle("italic").setHorizontalAlignment("center");
+  } else {
+    const qtyMedals = ["🥇","🥈","🥉"];
+    const qtyBgs    = ["#F1F8E9","#DCEDC8"];
+    rankQty.forEach((row, i) => {
+      const r = 18 + i;
+      const prefix = qtyMedals[i] ? qtyMedals[i] : (i+1)+"";
+      dbSheet.getRange(r,1).setValue(prefix).setHorizontalAlignment("center").setFontWeight("bold");
+      dbSheet.getRange(r,2).setValue(row[0]).setHorizontalAlignment("center");
+      dbSheet.getRange(r,3).setValue(row[1]);
+      dbSheet.getRange(r,4).setValue(row[2]).setNumberFormat("#,##0").setHorizontalAlignment("center").setFontWeight("bold").setFontColor("#1B5E20");
+      dbSheet.getRange(r,5).setValue(row[3]).setNumberFormat('#,##0.000 " DT"').setHorizontalAlignment("right");
+      dbSheet.getRange(r,6).setValue("");
+      const bg = qtyBgs[i%2];
+      dbSheet.getRange(r,1,1,6).setBackground(bg).setFontSize(10);
+      dbSheet.getRange(r,4).setFontWeight("bold").setFontColor("#1B5E20");
+      dbSheet.setRowHeight(r,24);
+    });
+  }
+
+  // ── Classement par Profit Réalisé (lignes 31-40) ──
+  dbSheet.getRange("A31:F40").clearContent().setBackground(null).setFontColor(null)
+    .setFontWeight("normal").setFontStyle("normal");
+  try { dbSheet.getRange("A31:F31").breakApart(); } catch(e){}
+
+  if (rankProfit.length === 0) {
+    dbSheet.getRange("A31:F31").merge()
+      .setValue("Aucune vente enregistrée.").setFontColor("#90A4AE")
+      .setFontStyle("italic").setHorizontalAlignment("center");
+  } else {
+    const profMedals = ["🥇","🥈","🥉"];
+    const profBgs    = ["#E8EAF6","#C5CAE9"];
+    rankProfit.forEach((row, i) => {
+      const r = 31 + i;
+      const prefix = profMedals[i] ? profMedals[i] : (i+1)+"";
+      const profitVal = row[3];
+      const profitColor = profitVal >= 0 ? "#1B5E20" : "#B71C1C";
+      dbSheet.getRange(r,1).setValue(prefix).setHorizontalAlignment("center").setFontWeight("bold");
+      dbSheet.getRange(r,2).setValue(row[0]).setHorizontalAlignment("center");
+      dbSheet.getRange(r,3).setValue(row[1]);
+      dbSheet.getRange(r,4).setValue(row[2]).setNumberFormat("#,##0").setHorizontalAlignment("center");
+      dbSheet.getRange(r,5).setValue(profitVal).setNumberFormat('#,##0.000 " DT"')
+        .setHorizontalAlignment("right").setFontWeight("bold").setFontColor(profitColor);
+      dbSheet.getRange(r,6).setValue("");
+      dbSheet.getRange(r,1,1,6).setBackground(profBgs[i%2]).setFontSize(10);
+      dbSheet.getRange(r,5).setFontWeight("bold").setFontColor(profitColor);
+      dbSheet.setRowHeight(r,24);
+    });
+  }
+
+  // ── Alertes — désormais tout en bas (lignes 44-52), sans case à cocher ──
+  dbSheet.getRange("A44:G52").clearContent().setBackground(null).setFontColor(null).setFontWeight("normal").setFontStyle("normal");
+  try { dbSheet.getRange("A44:F44").breakApart(); } catch(e){}
+  dbSheet.getRange("G44:G52").clearDataValidations();
+  if (alertRows.length === 0) {
+    dbSheet.getRange("A44:F44").merge()
+      .setValue("✅  Aucun produit en rupture ou en alerte actuellement.")
+      .setFontColor("#2E7D32").setFontStyle("italic").setHorizontalAlignment("center");
+  } else {
+    alertRows.forEach((row, i) => {
+      const r = 44 + i;
+      dbSheet.getRange(r, 1, 1, 6).setValues([row]);
+      dbSheet.getRange(r, 4).setNumberFormat("#,##0");
+      dbSheet.getRange(r, 5).setNumberFormat("#,##0");
+      dbSheet.getRange(r, 1, 1, 6).setBackground("#FFEBEE").setFontColor("#B71C1C");
+      dbSheet.getRange(r, 6).setFontWeight("bold");
+    });
+  }
+
+  // ── Horodatage ──
+  dbSheet.getRange("A2:G2").merge()
+    .setValue("⏱️  Mis à jour le : " + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd/MM/yyyy à HH:mm:ss"))
+    .setFontColor("#757575").setFontStyle("italic").setFontSize(10).setHorizontalAlignment("center");
+}
+
+
+// ============================================================
+//  4. INITIALISATION
+// ============================================================
+function setupApplication() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const rep = ui.alert("⚙️  Initialisation","Réinitialiser les 4 onglets ?\nLes données seront effacées.",ui.ButtonSet.YES_NO);
+  if (rep !== ui.Button.YES) return;
+  setupProductsSheet(ss);
+  setupSalesSheet(ss);
+  setupSuppliersSheet(ss);
+  setupClientsSheet(ss);
+  setupOrdersSheet(ss);
+  setupDashboardSheet(ss);
+  setupReportsSheet(ss);
+  setupDailySheet(ss);
+  updateDashboardValues();
+  const db = ss.getSheetByName(SHEET_DASHBOARD);
+  ss.setActiveSheet(db); ss.moveActiveSheet(1);
+  ui.alert("✅  Initialisé !\n\nÉTAPE SUIVANTE :\n🛠️ → 🔧 Installer les déclencheurs");
+}
+
+
+// ============================================================
+//  5. PAGE 2 : PRODUITS
+// ============================================================
+function setupProductsSheet(ss) {
+  let s = ss.getSheetByName(SHEET_PRODUCTS);
+  if (!s) s = ss.insertSheet(SHEET_PRODUCTS); else s.clear();
+  const h = ["Code Produit / SKU","Désignation","Catégorie","Prix d'Achat (DT)","Prix de Vente (DT)","Stock Initial","Qté Vendue","Stock Actuel","Seuil d'Alerte","Statut"];
+  s.getRange(1,1,1,h.length).setValues([h]);
+  formatHeaderRow(s,1,h.length);
+  s.getRange("G2").setFormula("=ARRAYFORMULA(IF(A2:A=\"\",\"\",IFERROR(SUMIF('"+SHEET_SALES+"'!C:C,A2:A,'"+SHEET_SALES+"'!F:F),0)))");
+  s.getRange("H2").setFormula("=ARRAYFORMULA(IF(A2:A=\"\",\"\",F2:F-G2:G))");
+  s.getRange("J2").setFormula("=ARRAYFORMULA(IF(A2:A=\"\",\"\",IF(H2:H<=I2:I,\"⚠️ ALERTE\",\"✅ OK\")))");
+  s.getRange("D2:E1000").setNumberFormat('#,##0.000 " DT"');
+  s.getRange("F2:I1000").setNumberFormat("#,##0");
+  const rules=[];
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextContains("ALERTE").setBackground(COLOR_ALERT_BG).setFontColor("#C62828").setBold(true).setRanges([s.getRange("J2:J1000")]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextContains("OK").setBackground(COLOR_OK_BG).setFontColor("#2E7D32").setRanges([s.getRange("J2:J1000")]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=AND($H2<>"",$H2<=$I2)').setBackground("#FFF3E0").setRanges([s.getRange("A2:J1000")]).build());
+  s.setConditionalFormatRules(rules);
+  [150,240,140,130,130,110,110,110,110,120].forEach((w,i)=>s.setColumnWidth(i+1,w));
+  s.setFrozenRows(1);
+  s.getRange("C2:C1000").setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(["Pièces moteur","Pièces freinage","Électricité","Transmission","Carrosserie","Accessoires","Lubrifiants","Pneus","Autres"],true).setAllowInvalid(false).build());
+  // ★ Aucun produit de démonstration : la feuille démarre vide, prête à être remplie via 🛠️ → ➕ Ajouter un Produit
+}
+
+
+// ============================================================
+//  6. PAGE 3 : VENTES
+//  ★ Ajout de la colonne K "Statut Vente" (vide = active, ANNULÉ = annulée)
+// ============================================================
+function setupSalesSheet(ss) {
+  let s = ss.getSheetByName(SHEET_SALES);
+  if (!s) s = ss.insertSheet(SHEET_SALES); else s.clear();
+  // ★ 12 colonnes désormais (ajout col K : Statut Vente, col L : Client)
+  const h = ["ID Vente","Date","Code Produit","Désignation","Prix Net (DT)","Quantité","Total (DT)","Mode de Paiement","💹 Profit (DT)","🏷️ Remise (DT)","📋 Statut","👤 Client"];
+  s.getRange(1,1,1,h.length).setValues([h]);
+  formatHeaderRow(s,1,h.length);
+  s.getRange("B2:B1000").setNumberFormat("DD/MM/YYYY");
+  s.getRange("E2:E1000").setNumberFormat('#,##0.000 " DT"');
+  s.getRange("G2:G1000").setNumberFormat('#,##0.000 " DT"');
+  s.getRange("I2:I1000").setNumberFormat('#,##0.000 " DT"');
+  s.getRange("J2:J1000").setNumberFormat('#,##0.000 " DT"');
+  s.getRange("F2:F1000").setNumberFormat("#,##0");
+
+  const rules = [];
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberGreaterThan(0).setFontColor("#1B5E20").setBold(true)
+    .setRanges([s.getRange("I2:I1000")]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberLessThan(0).setFontColor("#B71C1C").setBold(true)
+    .setRanges([s.getRange("I2:I1000")]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberEqualTo(0).setFontColor("#757575")
+    .setRanges([s.getRange("I2:I1000")]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberGreaterThan(0).setBackground("#FFF8E1").setFontColor("#E65100").setBold(true)
+    .setRanges([s.getRange("J2:J1000")]).build());
+  // ★ Formatage conditionnel pour les lignes ANNULÉES
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenTextEqualTo("ANNULÉ")
+    .setBackground("#FAFAFA").setFontColor("#BDBDBD").setStrikethrough(true)
+    .setRanges([s.getRange("A2:L1000")]).build());
+  s.setConditionalFormatRules(rules);
+
+  [100,110,130,250,140,90,130,150,130,120,100,160].forEach((w,i)=>s.setColumnWidth(i+1,w));
+  s.setFrozenRows(1);
+  // ★ Aucune vente de démonstration : la feuille démarre vide
+  recalculateSalesRows(ss);
+}
+
+function recalculateSalesRows(ss) {
+  ss = ss || SpreadsheetApp.getActiveSpreadsheet();
+  const salesSheet = ss.getSheetByName(SHEET_SALES);
+  const prodSheet  = ss.getSheetByName(SHEET_PRODUCTS);
+  if (!salesSheet || !prodSheet) return;
+
+  const prodData = prodSheet.getDataRange().getValues();
+  const prodMap = {};
+  for (let i = 1; i < prodData.length; i++) {
+    const r = prodData[i];
+    if (!r[0]) continue;
+    prodMap[String(r[0])] = {
+      designation: String(r[1]),
+      prixAchat:   Number(r[3]) || 0,
+      prixVente:   Number(r[4]) || 0
+    };
+  }
+
+  const lastRow = salesSheet.getLastRow();
+  if (lastRow < 2) return;
+  const salesData = salesSheet.getRange(2, 1, lastRow - 1, 11).getValues();
+
+  const dCol = [], eCol = [], gCol = [], iCol = [];
+
+  salesData.forEach((row) => {
+    const code = row[2];
+    if (!code) {
+      dCol.push([""]); eCol.push([""]); gCol.push([""]); iCol.push([""]);
+      return;
+    }
+    const prod    = prodMap[String(code)] || { designation: "Produit inconnu", prixAchat: 0, prixVente: 0 };
+    const qte     = Number(row[5]) || 0;
+    const remise  = Number(row[9]) || 0;
+    const prixNet = Math.max(prod.prixVente - remise, 0);
+    const total   = prixNet * qte;
+    const profit  = (prixNet - prod.prixAchat) * qte;
+    dCol.push([prod.designation]);
+    eCol.push([prixNet]);
+    gCol.push([total]);
+    iCol.push([profit]);
+  });
+
+  salesSheet.getRange(2, 4, dCol.length, 1).setValues(dCol);
+  salesSheet.getRange(2, 5, eCol.length, 1).setValues(eCol);
+  salesSheet.getRange(2, 7, gCol.length, 1).setValues(gCol);
+  salesSheet.getRange(2, 9, iCol.length, 1).setValues(iCol);
+}
+
+
+// ============================================================
+//  7. PAGE 1 : TABLEAU DE BORD (structure)
+// ============================================================
+// ★ Layout réorganisé : KPI → Top5 → Classement Qté → Classement Profit → Alertes (en dernier)
+function setupDashboardSheet(ss) {
+  let s = ss.getSheetByName(SHEET_DASHBOARD);
+  if (!s) s = ss.insertSheet(SHEET_DASHBOARD); else { s.clear(); s.clearConditionalFormatRules(); }
+  s.getRange("A1:G1").merge().setValue("🏬  VOTRE BOUTIQUE — Tableau de Bord")
+    .setBackground(COLOR_ACCENT).setFontColor("#FFF").setFontSize(16).setFontWeight("bold").setHorizontalAlignment("center").setVerticalAlignment("middle");
+  s.setRowHeight(1,50);
+  s.getRange("A2:G2").merge().setValue("En attente du premier calcul...")
+    .setFontColor("#90A4AE").setFontStyle("italic").setFontSize(10).setHorizontalAlignment("center");
+  s.getRange("A4:G4").merge().setValue("📊  INDICATEURS CLÉS DE PERFORMANCE")
+    .setBackground(COLOR_HEADER_BG).setFontColor("#FFF").setFontWeight("bold").setFontSize(12).setHorizontalAlignment("center");
+  ["💰 Valeur Totale\ndu Stock","📈 Chiffre d'Affaires\nGlobal","🛒 Ventes\ndu Jour","💹 Profit\ndu Jour","📦 Nb\nProduits","⚠️ Produits\nen Alerte"].forEach((t,i)=>{
+    s.getRange(5,i+1).setValue(t).setBackground(COLOR_HEADER_BG).setFontColor("#FFF").setFontWeight("bold").setFontSize(9).setHorizontalAlignment("center").setWrap(true);
+    s.setRowHeight(5,50);
+    s.getRange(6,i+1).setValue("—").setBackground(COLOR_KPI_BG).setFontSize(14).setFontWeight("bold").setHorizontalAlignment("center").setVerticalAlignment("middle");
+    s.setRowHeight(6,60);
+  });
+
+  // ── Séparateur + TOP 5 (lignes 7-14) ──
+  s.getRange("A7:G7").merge().setBackground("#E0E0E0"); s.setRowHeight(7,6);
+  s.getRange("A8:G8").merge().setValue("🏆  TOP 5 DES PRODUITS LES PLUS VENDUS")
+    .setBackground(COLOR_HEADER_BG).setFontColor("#FFF").setFontWeight("bold").setFontSize(12).setHorizontalAlignment("center"); s.setRowHeight(8,36);
+  ["Code Produit","Désignation","Qté Vendue","CA Total (DT)"].forEach((h,i)=>{
+    s.getRange(9,i+1).setValue(h).setBackground("#283593").setFontColor("#FFF").setFontWeight("bold").setHorizontalAlignment("center").setFontSize(10);
+  }); s.setRowHeight(9,32);
+  s.getRange("A10:D14").setBackground("#F3F4FF");
+
+  // ── Séparateur + Classement Quantité (lignes 15-27) ──
+  s.getRange("A15:G15").merge().setBackground("#E0E0E0"); s.setRowHeight(15,6);
+  s.getRange("A16:G16").merge()
+    .setValue("📦  CLASSEMENT PAR QUANTITÉ VENDUE (Top 10)")
+    .setBackground("#1B5E20").setFontColor("#FFF").setFontWeight("bold").setFontSize(12)
+    .setHorizontalAlignment("center"); s.setRowHeight(16,36);
+  ["#","Code Produit","Désignation","Qté Vendue","CA Total (DT)",""].forEach((h,i)=>{
+    s.getRange(17,i+1).setValue(h)
+      .setBackground("#2E7D32").setFontColor("#FFF").setFontWeight("bold")
+      .setHorizontalAlignment("center").setFontSize(10);
+  }); s.setRowHeight(17,30);
+  s.getRange("A18:F27").setBackground("#F1F8E9");
+
+  // ── Séparateur + Classement Profit (lignes 28-40) ──
+  s.getRange("A28:G28").merge().setBackground("#E0E0E0"); s.setRowHeight(28,6);
+  s.getRange("A29:G29").merge()
+    .setValue("💹  CLASSEMENT PAR PROFIT RÉALISÉ (Top 10)")
+    .setBackground("#1A237E").setFontColor("#FFF").setFontWeight("bold").setFontSize(12)
+    .setHorizontalAlignment("center"); s.setRowHeight(29,36);
+  ["#","Code Produit","Désignation","Qté Vendue","Profit (DT)",""].forEach((h,i)=>{
+    s.getRange(30,i+1).setValue(h)
+      .setBackground("#283593").setFontColor("#FFF").setFontWeight("bold")
+      .setHorizontalAlignment("center").setFontSize(10);
+  }); s.setRowHeight(30,30);
+  s.getRange("A31:F40").setBackground("#E8EAF6");
+
+  // ── Séparateur + ALERTES, désormais tout en bas (lignes 41-52) — sans case à cocher ──
+  s.getRange("A41:G41").merge().setBackground("#E0E0E0"); s.setRowHeight(41,6);
+  s.getRange("A42:G42").merge().setValue("🚨  PRODUITS EN RUPTURE OU SOUS LE SEUIL D'ALERTE")
+    .setBackground("#B71C1C").setFontColor("#FFF").setFontWeight("bold").setFontSize(12).setHorizontalAlignment("center"); s.setRowHeight(42,36);
+  ["Code Produit","Désignation","Catégorie","Stock Actuel","Seuil","Statut"].forEach((h,i)=>{
+    s.getRange(43,i+1).setValue(h).setBackground("#C62828").setFontColor("#FFF").setFontWeight("bold").setHorizontalAlignment("center").setFontSize(10);
+  }); s.setRowHeight(43,32);
+  s.getRange("A44:F52").setBackground("#FFF9F9");
+
+  [150,230,200,130,140,110,110].forEach((w,i)=>s.setColumnWidth(i+1,w));
+  s.getRange("A1:G52").setBorder(true,true,true,true,true,true,"#B0BEC5",SpreadsheetApp.BorderStyle.SOLID);
+}
+
+
+// ============================================================
+//  8. PAGE 4 : RAPPORTS
+// ============================================================
+function setupReportsSheet(ss) {
+  let s = ss.getSheetByName(SHEET_REPORTS);
+  if (!s) s = ss.insertSheet(SHEET_REPORTS); else s.clear();
+  s.getRange("A1:E1").merge().setValue("📊  RAPPORTS & ANALYSES — Votre Boutique")
+    .setBackground(COLOR_HEADER_BG).setFontColor("#FFF").setFontSize(14).setFontWeight("bold").setHorizontalAlignment("center"); s.setRowHeight(1,45);
+  s.getRange("A3:E3").merge().setValue("Utilisez le menu 🛠️ → Générer le Rapport Mensuel")
+    .setFontStyle("italic").setFontColor("#757575").setHorizontalAlignment("center");
+  s.setColumnWidth(1,40); s.setColumnWidth(2,400);
+}
+
+
+// ============================================================
+//  9B. PAGE 5 : SUIVI JOURNALIER
+// ============================================================
+function setupDailySheet(ss) {
+  ss = ss || SpreadsheetApp.getActiveSpreadsheet();
+  let s = ss.getSheetByName(SHEET_DAILY);
+  if (!s) s = ss.insertSheet(SHEET_DAILY); else s.clear();
+
+  // Titre
+  s.getRange("A1:D1").merge()
+    .setValue("📅  VOTRE BOUTIQUE — Suivi Journalier des Ventes")
+    .setBackground(COLOR_HEADER_BG).setFontColor("#FFF")
+    .setFontSize(14).setFontWeight("bold").setHorizontalAlignment("center");
+  s.setRowHeight(1, 45);
+
+  s.getRange("A2:D2").merge()
+    .setValue("Mis à jour automatiquement à chaque actualisation du tableau de bord")
+    .setFontColor("#90A4AE").setFontStyle("italic").setFontSize(10)
+    .setHorizontalAlignment("center");
+
+  // En-têtes colonnes
+  const headers = ["📅 Date", "💰 Ventes du Jour (DT)", "💹 Profit du Jour (DT)", "📊 Nb Ventes"];
+  headers.forEach((h, i) => {
+    s.getRange(3, i + 1).setValue(h)
+      .setBackground(COLOR_ACCENT).setFontColor("#FFF")
+      .setFontWeight("bold").setFontSize(11)
+      .setHorizontalAlignment("center").setVerticalAlignment("middle");
+  });
+  s.setRowHeight(3, 36);
+
+  // Formats colonnes
+  s.getRange("A4:A1000").setNumberFormat("DD/MM/YYYY");
+  s.getRange("B4:C1000").setNumberFormat('#,##0.000 " DT"');
+  s.getRange("D4:D1000").setNumberFormat("#,##0");
+
+  // Formatage conditionnel profit (vert/rouge)
+  const rules = [];
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberGreaterThan(0).setFontColor("#1B5E20").setBold(true)
+    .setRanges([s.getRange("C4:C1000")]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberLessThan(0).setFontColor("#B71C1C").setBold(true)
+    .setRanges([s.getRange("C4:C1000")]).build());
+  // Ligne paire alternée
+  rules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=MOD(ROW(),2)=0')
+    .setBackground(COLOR_ALT_ROW)
+    .setRanges([s.getRange("A4:D1000")]).build());
+  s.setConditionalFormatRules(rules);
+
+  // Largeurs colonnes
+  [130, 180, 180, 110].forEach((w, i) => s.setColumnWidth(i + 1, w));
+  s.setFrozenRows(3);
+
+  // Bordure globale
+  s.getRange("A1:D2").setBorder(true,true,true,true,true,true,"#B0BEC5",SpreadsheetApp.BorderStyle.SOLID);
+  s.getRange("A3:D3").setBorder(true,true,true,true,true,true,"#FFFFFF",SpreadsheetApp.BorderStyle.SOLID);
+}
+
+function goToDailySheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let s = ss.getSheetByName(SHEET_DAILY);
+  if (!s) { setupDailySheet(ss); s = ss.getSheetByName(SHEET_DAILY); }
+  ss.setActiveSheet(s);
+}
+
+// ============================================================
+//  9C. PAGE 6 : FOURNISSEURS
+// ============================================================
+function setupSuppliersSheet(ss) {
+  ss = ss || SpreadsheetApp.getActiveSpreadsheet();
+  let s = ss.getSheetByName(SHEET_SUPPLIERS);
+  if (!s) s = ss.insertSheet(SHEET_SUPPLIERS); else s.clear();
+  const h = ["Nom Fournisseur","Téléphone","Adresse","Code Produit","Prix Fournisseur (DT)","Date MAJ"];
+  s.getRange(1,1,1,h.length).setValues([h]);
+  formatHeaderRow(s,1,h.length);
+  s.getRange("E2:E2000").setNumberFormat('#,##0.000 " DT"');
+  s.getRange("F2:F2000").setNumberFormat("DD/MM/YYYY");
+  [180,120,220,140,150,110].forEach((w,i)=>s.setColumnWidth(i+1,w));
+  s.setFrozenRows(1);
+}
+
+function ensureSuppliersSheet(ss) {
+  ss = ss || SpreadsheetApp.getActiveSpreadsheet();
+  let s = ss.getSheetByName(SHEET_SUPPLIERS);
+  if (!s) setupSuppliersSheet(ss);
+  return ss.getSheetByName(SHEET_SUPPLIERS);
+}
+
+// ============================================================
+//  9D. PAGE 7 : CLIENTS
+// ============================================================
+function setupClientsSheet(ss) {
+  ss = ss || SpreadsheetApp.getActiveSpreadsheet();
+  let s = ss.getSheetByName(SHEET_CLIENTS);
+  if (!s) s = ss.insertSheet(SHEET_CLIENTS); else s.clear();
+  const h = ["Nom Client","Téléphone","Adresse","Date d'Inscription"];
+  s.getRange(1,1,1,h.length).setValues([h]);
+  formatHeaderRow(s,1,h.length);
+  s.getRange("D2:D2000").setNumberFormat("DD/MM/YYYY");
+  s.getRange(2,1).setValue("Client Passager");
+  [200,140,260,150].forEach((w,i)=>s.setColumnWidth(i+1,w));
+  s.setFrozenRows(1);
+}
+
+function ensureClientsSheet(ss) {
+  ss = ss || SpreadsheetApp.getActiveSpreadsheet();
+  let s = ss.getSheetByName(SHEET_CLIENTS);
+  if (!s) setupClientsSheet(ss);
+  return ss.getSheetByName(SHEET_CLIENTS);
+}
+
+// ============================================================
+//  9E. PAGE 8 : COMMANDES FOURNISSEURS
+// ============================================================
+function setupOrdersSheet(ss) {
+  ss = ss || SpreadsheetApp.getActiveSpreadsheet();
+  let s = ss.getSheetByName(SHEET_ORDERS);
+  if (!s) s = ss.insertSheet(SHEET_ORDERS); else s.clear();
+  const h = ["ID Commande","Date","Fournisseur","Code Produit","Désignation","Qté à Commander","Prix Fournisseur (DT)","Total (DT)","Statut"];
+  s.getRange(1,1,1,h.length).setValues([h]);
+  formatHeaderRow(s,1,h.length);
+  s.getRange("B2:B2000").setNumberFormat("DD/MM/YYYY");
+  s.getRange("G2:H2000").setNumberFormat('#,##0.000 " DT"');
+  s.getRange("F2:F2000").setNumberFormat("#,##0");
+  [130,110,180,140,240,120,150,130,120].forEach((w,i)=>s.setColumnWidth(i+1,w));
+  s.setFrozenRows(1);
+}
+
+function ensureOrdersSheet(ss) {
+  ss = ss || SpreadsheetApp.getActiveSpreadsheet();
+  let s = ss.getSheetByName(SHEET_ORDERS);
+  if (!s) setupOrdersSheet(ss);
+  return ss.getSheetByName(SHEET_ORDERS);
+}
+
+// ============================================================
+//  9. ACTUALISATION MANUELLE
+// ============================================================
+function refreshDashboard() {
+  updateDashboardValues();
+  SpreadsheetApp.getUi().alert("✅  Tableau de Bord actualisé !");
+}
+
+function recalculateSalesRowsMenu() {
+  recalculateSalesRows(SpreadsheetApp.getActiveSpreadsheet());
+  updateDashboardValues();
+  SpreadsheetApp.getUi().alert("✅  Colonnes Désignation / Prix / Total de la Page Ventes recalculées !");
+}
+
+
+// ============================================================
+//  10. DIALOGUE PRODUIT
+//  ★ MODIFICATION : affiche stockActuel (calculé en JS) au lieu de stockInitial
+// ============================================================
+function showAddProductDialog() {
+  const html = HtmlService.createHtmlOutput(buildProductDialogHtml())
+    .setWidth(480).setHeight(600).setTitle("Produits — Votre Boutique");
+  SpreadsheetApp.getUi().showModalDialog(html, "➕  Ajouter / Modifier un Produit");
+}
+
+function buildProductDialogHtml() {
+  return '<!DOCTYPE html>' +
+'<html><head><base target="_top"><style>' +
+'*{box-sizing:border-box;margin:0;padding:0;font-family:\'Segoe UI\',Arial,sans-serif}' +
+'body{background:#F5F5F5;padding:16px}' +
+'h2{background:#1A237E;color:white;padding:14px 16px;border-radius:8px 8px 0 0;font-size:15px;margin-bottom:0}' +
+'.card{background:white;border-radius:0 0 8px 8px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,.1)}' +
+'.fg{margin-bottom:13px;position:relative}' +
+'label{display:block;font-size:12px;font-weight:600;color:#37474F;margin-bottom:4px}' +
+'input,select{width:100%;padding:8px 10px;border:1.5px solid #CFD8DC;border-radius:5px;font-size:13px;color:#263238}' +
+'input:focus,select:focus{outline:none;border-color:#1A237E}' +
+'.r2{display:grid;grid-template-columns:1fr 1fr;gap:10px}' +
+'.hint{font-size:11px;color:#90A4AE;margin-top:3px}' +
+'.btns{display:flex;gap:10px;margin-top:16px}' +
+'.bs{flex:2;padding:10px;background:#FF6F00;color:white;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer}' +
+'.bs:disabled{background:#BDBDBD;cursor:default}' +
+'.bs:hover:not(:disabled){background:#E65100}' +
+'.bc{flex:1;padding:10px;background:#ECEFF1;color:#546E7A;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer}' +
+'.msg{margin-top:12px;font-size:12px;padding:8px 12px;border-radius:5px;display:none}' +
+'.s{background:#E8F5E9;color:#2E7D32;display:block}' +
+'.e{background:#FFEBEE;color:#C62828;display:block}' +
+'.tabs{display:flex;gap:8px;margin-bottom:14px}' +
+'.tab{flex:1;padding:8px;border:2px solid #B0BEC5;background:white;color:#546E7A;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer}' +
+'.tab.on{border-color:#1A237E;background:#E8EAF6;color:#1A237E}' +
+'#szone{display:none;margin-bottom:14px;position:relative}' +
+'#aclist{position:absolute;top:100%;left:0;right:0;z-index:9999;background:white;' +
+'border:1.5px solid #1A237E;border-radius:0 0 6px 6px;max-height:200px;overflow-y:auto;' +
+'box-shadow:0 4px 12px rgba(0,0,0,.2)}' +
+'.aci{padding:9px 12px;cursor:pointer;font-size:12px;border-bottom:1px solid #F5F5F5;' +
+'display:flex;justify-content:space-between;align-items:center}' +
+'.aci:hover{background:#E8EAF6}' +
+'.acode{font-weight:700;color:#1A237E;margin-right:8px;min-width:80px;display:inline-block}' +
+'.aprix{font-size:11px;color:#78909C;white-space:nowrap}' +
+// ★ Style badge stock actuel
+'.stock-badge{display:inline-block;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:700;margin-top:4px}' +
+'.stock-ok{background:#E8F5E9;color:#2E7D32}' +
+'.stock-low{background:#FFF3E0;color:#E65100}' +
+'.stock-zero{background:#FFEBEE;color:#C62828}' +
+'</style></head><body>' +
+'<h2>➕  Ajouter / Modifier un Produit</h2>' +
+'<div class="card">' +
+'<div class="tabs">' +
+'<button class="tab on" id="ta" onclick="setMode(\'add\')">➕ Nouveau produit</button>' +
+'<button class="tab" id="te" onclick="setMode(\'edit\')">✏️ Modifier existant</button>' +
+'</div>' +
+'<div id="szone">' +
+'<label>Rechercher un article à modifier (Code ou Désignation)</label>' +
+'<input type="text" id="si" placeholder="Tapez pour rechercher (code ou désignation)..." autocomplete="off" oninput="doSearch()" onfocus="doSearch(true)">' +
+'<div id="aclist"></div>' +
+// ★ Zone affichage stock actuel après sélection
+'<div id="stockinfo" style="margin-top:6px;min-height:22px"></div>' +
+'<div id="sr" style="margin-top:4px;font-size:12px;color:#546E7A"></div>' +
+'</div>' +
+'<div class="fg"><label>Code Produit / SKU *</label><input type="text" id="code" placeholder="ex: MMS-006"><div class="hint">Unique. En mode Modifier, sélectionnez un article dans la liste ci-dessus.</div></div>' +
+'<div class="fg"><label>Désignation *</label><input type="text" id="des" placeholder="ex: Bougie NGK CR7HSA"></div>' +
+'<div class="fg"><label>Catégorie *</label><select id="cat"><option value="">-- Choisir --</option>' +
+'<option>Pièces moteur</option><option>Pièces freinage</option><option>Électricité</option>' +
+'<option>Transmission</option><option>Carrosserie</option><option>Accessoires</option>' +
+'<option>Lubrifiants</option><option>Pneus</option><option>Autres</option></select></div>' +
+'<div class="fg" id="fournZone"><label id="fournLbl">Fournisseur *</label>' +
+'<select id="fourn" onchange="onFournChange()"><option value="">-- Choisir un fournisseur --</option><option value="__new__">➕ Nouveau fournisseur...</option></select>' +
+'<input type="text" id="fournNew" placeholder="Nom du nouveau fournisseur" style="display:none;margin-top:6px" oninput="syncPa()">' +
+'<div class="hint" id="fournHint">Obligatoire pour un nouveau produit. Un article peut avoir plusieurs fournisseurs (Page 6).</div></div>' +
+'<div class="r2">' +
+'<div class="fg"><label id="pfLbl">Prix Fournisseur (DT) *</label><input type="number" id="pf" placeholder="0.000" step="0.001" min="0" oninput="syncPa()"></div>' +
+'<div class="fg"><label>Prix de Vente (DT) *</label><input type="number" id="pv" placeholder="0.000" step="0.001" min="0"></div>' +
+'</div>' +
+'<div class="fg"><label>Prix d\'Achat (DT) — prix fournisseur le plus élevé</label><input type="number" id="pa" placeholder="0.000" step="0.001" min="0" readonly style="background:#F5F5F5;color:#546E7A"></div>' +
+'<div class="r2">' +
+'<div class="fg"><label>Stock Initial *</label><input type="number" id="si2" placeholder="0" min="0"></div>' +
+'<div class="fg"><label>Seuil d\'Alerte *</label><input type="number" id="se" placeholder="0" min="0"></div>' +
+'</div>' +
+'<div class="btns">' +
+'<button class="bs" id="btnS" onclick="doSave()">💾  Enregistrer</button>' +
+'<button class="bc" onclick="google.script.host.close()">Annuler</button>' +
+'</div>' +
+'<div class="msg" id="msg"></div>' +
+'</div>' +
+'<script>' +
+'var mode="add";' +
+'var prodList=[];' +
+'var prodMap={};' +
+'function syncPa(){document.getElementById("pa").value=document.getElementById("pf").value;}' +
+'function onFournChange(){' +
+'  var sel=document.getElementById("fourn").value;' +
+'  document.getElementById("fournNew").style.display=(sel==="__new__")?"block":"none";' +
+'}' +
+'function getFournName(){' +
+'  var sel=document.getElementById("fourn").value;' +
+'  return sel==="__new__"?document.getElementById("fournNew").value.trim():sel;' +
+'}' +
+'function loadSuppliers(){' +
+'  google.script.run.withSuccessHandler(function(list){' +
+'    var names={};(list||[]).forEach(function(s){if(s.nom)names[s.nom]=true;});' +
+'    var sel=document.getElementById("fourn");' +
+'    Object.keys(names).sort().forEach(function(n){' +
+'      var o=document.createElement("option");o.value=n;o.textContent=n;' +
+'      sel.insertBefore(o,sel.lastChild);' +
+'    });' +
+'  }).getAllSuppliers();' +
+'}' +
+
+'window.onload=function(){' +
+'  loadSuppliers();' +
+'  google.script.run' +
+'    .withSuccessHandler(function(list){' +
+'      prodList=list||[];' +
+'      prodMap={};' +
+'      for(var i=0;i<prodList.length;i++){prodMap[prodList[i].code]=prodList[i];}' +
+'    })' +
+'    .withFailureHandler(function(e){console.log("Erreur chargement produits : "+e.message);})' +
+'    .getAllProducts();' +
+'  document.addEventListener("click",function(ev){' +
+'    if(!ev.target.closest("#si")&&!ev.target.closest("#aclist"))closeAC();' +
+'  });' +
+'};' +
+
+'function setMode(m){' +
+'  mode=m;' +
+'  document.getElementById("ta").className="tab"+(m==="add"?" on":"");' +
+'  document.getElementById("te").className="tab"+(m==="edit"?" on":"");' +
+'  document.getElementById("szone").style.display=m==="edit"?"block":"none";' +
+'  document.getElementById("fournLbl").textContent=m==="add"?"Fournisseur *":"Fournisseur (optionnel — ajoute un nouveau prix)";' +
+'  document.getElementById("pfLbl").textContent=m==="add"?"Prix Fournisseur (DT) *":"Prix Fournisseur (DT)";' +
+'  document.getElementById("fournHint").textContent=m==="add"?"Obligatoire pour un nouveau produit. Un article peut avoir plusieurs fournisseurs (Page 6).":"Laissez vide pour ne pas changer les fournisseurs existants.";' +
+'  if(m==="add")clearF();' +
+'}' +
+
+'function norm(s){return (s||"").toString().toLowerCase().normalize("NFD").replace(/[\\u0300-\\u036f]/g,"");}' +
+'function doSearch(showAll){' +
+'  var q=norm(document.getElementById("si").value.trim());' +
+'  var ac=document.getElementById("aclist");' +
+'  if(!q&&!showAll){ac.innerHTML="";return;}' +
+'  var matches=[];' +
+'  for(var i=0;i<prodList.length&&matches.length<10;i++){' +
+'    var p=prodList[i];' +
+'    if(!q||norm(p.code).indexOf(q)>=0||norm(p.designation).indexOf(q)>=0)matches.push(p);' +
+'  }' +
+'  if(!matches.length){ac.innerHTML=\'<div class="aci" style="color:#90A4AE">Aucun résultat</div>\';return;}' +
+'  var html="";' +
+'  for(var j=0;j<matches.length;j++){' +
+'    var p=matches[j];' +
+'    html+=\'<div class="aci" data-code="\'+p.code+\'" onclick="pickProduct(this)">\'+' +
+'          \'<span><span class="acode">\'+p.code+\'</span>\'+p.designation+\'</span>\'+' +
+'          \'<span class="aprix">\'+p.prixVente.toFixed(3)+\' DT</span></div>\';' +
+'  }' +
+'  ac.innerHTML=html;' +
+'}' +
+
+// ★ MODIFICATION PRINCIPALE : affiche stockActuel (calculé JS côté serveur)
+'function pickProduct(el){' +
+'  var code=el.getAttribute("data-code");' +
+'  var p=prodMap[code];' +
+'  closeAC();' +
+'  if(!p){document.getElementById("sr").innerHTML="⚠️ Produit introuvable.";return;}' +
+'  document.getElementById("si").value=p.code+" — "+p.designation;' +
+// ★ Affichage visuel du stock ACTUEL avec badge coloré
+'  var stockCls=p.stock<=0?"stock-zero":(p.stock<=p.seuil?"stock-low":"stock-ok");' +
+'  var stockLbl=p.stock<=0?"⛔ Rupture (0)":(p.stock<=p.seuil?"⚠️ Stock bas : "+p.stock+" unité(s)":"✅ Stock actuel : "+p.stock+" unité(s)");' +
+'  document.getElementById("stockinfo").innerHTML=\'<span class="stock-badge \'+stockCls+\'">\'+stockLbl+\'</span>\';' +
+'  document.getElementById("sr").innerHTML="Stock initial : "+p.stockInitial+" | Vendu : "+(p.stockInitial-p.stock)+" | <strong>Actuel : "+p.stock+"</strong>";' +
+'  document.getElementById("code").value=p.code||"";' +
+'  document.getElementById("des").value=p.designation||"";' +
+'  document.getElementById("cat").value=p.categorie||"";' +
+'  document.getElementById("pa").value=p.prixAchat||"";' +
+'  document.getElementById("pv").value=p.prixVente||"";' +
+'  document.getElementById("si2").value=p.stockInitial||"";' +
+'  document.getElementById("se").value=p.seuil||"";' +
+'  document.getElementById("fourn").value="";' +
+'  document.getElementById("pf").value="";' +
+'}' +
+
+'function closeAC(){document.getElementById("aclist").innerHTML="";}' +
+
+'function clearF(){' +
+'  ["code","des","pa","pv","si2","se","fourn","pf","fournNew"].forEach(function(id){document.getElementById(id).value="";});' +
+'  document.getElementById("fournNew").style.display="none";' +
+'  document.getElementById("cat").value="";' +
+'  var siEl=document.getElementById("si"); if(siEl)siEl.value="";' +
+'  var srEl=document.getElementById("sr"); if(srEl)srEl.innerHTML="";' +
+'  var siEl2=document.getElementById("stockinfo"); if(siEl2)siEl2.innerHTML="";' +
+'  closeAC();' +
+'  document.getElementById("msg").className="msg";' +
+'}' +
+
+'function doSave(){' +
+'  var code=document.getElementById("code").value.trim();' +
+'  var des=document.getElementById("des").value.trim();' +
+'  var cat=document.getElementById("cat").value;' +
+'  var fourn=getFournName();' +
+'  var pf=parseFloat(document.getElementById("pf").value)||0;' +
+'  var pa=parseFloat(document.getElementById("pa").value)||0;' +
+'  var pv=parseFloat(document.getElementById("pv").value)||0;' +
+'  var si2=parseInt(document.getElementById("si2").value)||0;' +
+'  var se=parseInt(document.getElementById("se").value)||0;' +
+'  if(!code||!des||!cat){showMsg("Remplissez tous les champs obligatoires (*)","e");return;}' +
+'  if(mode==="add"&&!fourn){showMsg("Le fournisseur est obligatoire pour un nouveau produit.","e");return;}' +
+'  if(mode==="add"&&pf<=0){showMsg("Indiquez le prix fournisseur (prix d\'achat).","e");return;}' +
+'  var paFinal=pf>0?pf:pa;' +
+'  if(pv<paFinal){showMsg("⚠️ Prix de vente inférieur au prix d\'achat !","e");return;}' +
+'  var btn=document.getElementById("btnS");' +
+'  btn.disabled=true;btn.textContent="⏳ Enregistrement...";' +
+'  var payload={code:code,designation:des,categorie:cat,fournisseur:fourn,prixFournisseur:pf,prixAchat:paFinal,prixVente:pv,stockInitial:si2,seuil:se,mode:mode};' +
+'  google.script.run' +
+'    .withSuccessHandler(function(r){' +
+'      showMsg(r,"s");' +
+'      btn.disabled=false;btn.textContent="💾  Enregistrer";' +
+'      if(mode==="add")clearF();' +
+'      else{' +
+'        google.script.run.withSuccessHandler(function(list){' +
+'          prodList=list||[];prodMap={};' +
+'          for(var i=0;i<prodList.length;i++){prodMap[prodList[i].code]=prodList[i];}' +
+'        }).getAllProducts();' +
+'      }' +
+'    })' +
+'    .withFailureHandler(function(err){' +
+'      showMsg("Erreur : "+err.message,"e");' +
+'      btn.disabled=false;btn.textContent="💾  Enregistrer";' +
+'    })' +
+'    .saveProduct(payload);' +
+'}' +
+'function showMsg(t,cls){var el=document.getElementById("msg");el.textContent=t;el.className="msg "+cls;}' +
+'<\/script></body></html>';
+}
+
+
+// ============================================================
+//  11. DIALOGUE VENTE
+// ============================================================
+function showAddSaleDialog() {
+  const html = HtmlService.createHtmlOutput(buildSaleDialogHtml())
+    .setWidth(660).setHeight(700).setTitle("Ventes — Votre Boutique");
+  SpreadsheetApp.getUi().showModalDialog(html, "🛒  Enregistrer une Vente");
+}
+
+function buildSaleDialogHtml() {
+  return '<!DOCTYPE html>' +
+'<html><head><base target="_top"><style>' +
+'*{box-sizing:border-box;margin:0;padding:0;font-family:\'Segoe UI\',Arial,sans-serif}' +
+'body{background:#F5F5F5;padding:16px}' +
+'h2{background:#FF6F00;color:white;padding:14px 18px;border-radius:8px 8px 0 0;font-size:15px}' +
+'.card{background:white;border-radius:0 0 8px 8px;padding:18px;box-shadow:0 2px 8px rgba(0,0,0,.12)}' +
+'.sec-title{font-size:13px;color:#1A237E;font-weight:700;margin-bottom:8px;border-bottom:2px solid #E8EAF6;padding-bottom:4px}' +
+'#empty{font-size:12px;color:#90A4AE;font-style:italic;padding:10px 0;text-align:center}' +
+'table{width:100%;border-collapse:collapse;font-size:11px}' +
+'thead tr{background:#1A237E;color:white}' +
+'th{padding:6px 6px;text-align:left;font-weight:600;font-size:11px}' +
+'tbody tr{border-bottom:1px solid #ECEFF1}' +
+'tbody tr:nth-child(even){background:#F8F9FF}' +
+'td{padding:5px 6px;vertical-align:middle}' +
+'.bdel{background:none;border:none;color:#EF5350;font-size:14px;cursor:pointer;padding:2px 5px;border-radius:4px}' +
+'.bdel:hover{background:#FFEBEE}' +
+'.ninp{width:62px;padding:3px 4px;text-align:right;border:1px solid #CFD8DC;border-radius:4px;font-size:11px}' +
+'.rinp{width:70px;padding:3px 4px;text-align:right;border:1.5px solid #FFB300;border-radius:4px;font-size:11px;background:#FFFDE7;color:#E65100;font-weight:600}' +
+'.rinp:focus{outline:none;border-color:#FF6F00}' +
+'#totals{background:#E8EAF6;border-radius:6px;padding:10px 14px;display:none;margin:10px 0}' +
+'#totals .row{display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px}' +
+'#totals .remrow{display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;color:#E65100}' +
+'#totals .grand{font-weight:700;font-size:15px;color:#1A237E}' +
+'.fg{margin-bottom:12px;position:relative}' +
+'label{display:block;font-size:12px;font-weight:600;color:#37474F;margin-bottom:4px}' +
+'input,select{width:100%;padding:8px 10px;border:1.5px solid #CFD8DC;border-radius:5px;font-size:13px;color:#263238}' +
+'input:focus,select:focus{outline:none;border-color:#FF6F00}' +
+'#aclist{position:absolute;top:100%;left:0;right:0;z-index:9999;background:white;' +
+'border:1.5px solid #FF6F00;border-radius:0 0 6px 6px;max-height:160px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.2)}' +
+'#clac{position:absolute;top:100%;left:0;right:0;z-index:9999;background:white;' +
+'border:1.5px solid #1A237E;border-radius:0 0 6px 6px;max-height:140px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.2)}' +
+'.clai{padding:8px 12px;cursor:pointer;font-size:12px;border-bottom:1px solid #F5F5F5}' +
+'.clai:hover{background:#E8EAF6}' +
+'.aci{padding:8px 12px;cursor:pointer;font-size:12px;border-bottom:1px solid #F5F5F5;' +
+'display:flex;justify-content:space-between;align-items:center}' +
+'.aci:hover{background:#FFF3E0}' +
+'.acode{font-weight:700;color:#FF6F00;margin-right:8px;min-width:75px;display:inline-block}' +
+'.ast{font-size:11px;white-space:nowrap}' +
+'.ast.low{color:#EF5350;font-weight:600}' +
+'.ast.ok{color:#388E3C}' +
+'.addrow{display:grid;grid-template-columns:1fr 80px 80px;gap:8px;align-items:end}' +
+'.badd{background:#1A237E;color:white;border:none;border-radius:6px;padding:9px 14px;' +
+'font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;width:100%}' +
+'.badd:hover{background:#283593}' +
+'.sep{border:none;border-top:2px solid #E8EAF6;margin:12px 0}' +
+'.r2{display:grid;grid-template-columns:1fr 1fr;gap:10px}' +
+'.btns{display:flex;gap:10px;margin-top:12px}' +
+'.bsave{flex:2;padding:10px;background:#FF6F00;color:white;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer}' +
+'.bsave:disabled{background:#BDBDBD;cursor:default}' +
+'.bsave:hover:not(:disabled){background:#E65100}' +
+'.bcancel{flex:1;padding:10px;background:#ECEFF1;color:#546E7A;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer}' +
+'.msg{margin-top:10px;font-size:12px;padding:8px 12px;border-radius:5px;display:none}' +
+'.s{background:#E8F5E9;color:#2E7D32;display:block}' +
+'.e{background:#FFEBEE;color:#C62828;display:block}' +
+'.badge{display:inline-block;background:#FF6F00;color:white;border-radius:12px;font-size:10px;padding:1px 8px;margin-left:8px}' +
+'#selinfo{font-size:11px;color:#546E7A;margin-top:5px;min-height:15px}' +
+'.rem-badge{display:inline-block;background:#FFF3E0;color:#E65100;border-radius:10px;font-size:10px;padding:1px 7px;margin-left:4px;font-weight:700}' +
+'</style></head>' +
+'<body>' +
+'<h2>🛒  Enregistrer une Vente <span id="badge" class="badge" style="display:none">0</span></h2>' +
+'<div class="card">' +
+
+'<div class="sec-title">🧾 Panier</div>' +
+'<div id="empty">Aucun article — recherchez un produit ci-dessous.</div>' +
+'<table id="ctable" style="display:none">' +
+'<thead><tr>' +
+'<th>Code</th>' +
+'<th>Désignation</th>' +
+'<th style="text-align:right">P.V (DT)</th>' +
+'<th style="text-align:center">Qté</th>' +
+'<th style="text-align:right;color:#FFD54F">🏷️ Remise/u</th>' +
+'<th style="text-align:right">Net (DT)</th>' +
+'<th style="text-align:right">Total</th>' +
+'<th></th>' +
+'</tr></thead>' +
+'<tbody id="cbody"></tbody>' +
+'</table>' +
+
+'<div id="totals">' +
+'<div class="row"><span>Unités totales :</span><span id="titems">0</span></div>' +
+'<div class="remrow" id="remrow" style="display:none"><span>🏷️ Remise totale accordée :</span><span id="tremise">0,000 DT</span></div>' +
+'<div class="row"><span>Montant brut :</span><span id="tbrut">0,000 DT</span></div>' +
+'<div class="row grand"><span>💰 Total net à payer :</span><span id="tamount">0,000 DT</span></div>' +
+'</div>' +
+
+'<div class="addrow" style="margin-top:10px">' +
+'<div class="fg" style="margin-bottom:0">' +
+'<label>Rechercher un produit (Code ou Désignation)</label>' +
+'<input type="text" id="sprod" placeholder="Tapez le code ou la désignation..." autocomplete="off" oninput="onSrch()" onfocus="onSrch(true)">' +
+'<div id="aclist"></div>' +
+'</div>' +
+'<div class="fg" style="margin-bottom:0"><label>Quantité</label><input type="number" id="qinp" value="1" min="1" step="1"></div>' +
+'<div class="fg" style="margin-bottom:0"><label>🏷️ Remise (DT)</label><input type="number" id="rinp" value="0" min="0" step="0.001" placeholder="0.000" style="border:1.5px solid #FFB300;background:#FFFDE7;color:#E65100;font-weight:600"></div>' +
+'</div>' +
+'<div id="selinfo"></div>' +
+'<div style="margin-top:8px"><button class="badd" onclick="addToCart()">+ Ajouter au panier</button></div>' +
+
+'<hr class="sep">' +
+
+'<div class="r2">' +
+'<div class="fg"><label>Date de vente *</label><input type="date" id="sdate"></div>' +
+'<div class="fg"><label>Mode de paiement *</label>' +
+'<select id="spay">' +
+'<option value="Espèces">💵 Espèces</option>' +
+'<option value="Chèque">📄 Chèque</option>' +
+'<option value="Virement bancaire">🏦 Virement bancaire</option>' +
+'<option value="Carte bancaire">💳 Carte bancaire</option>' +
+'</select></div>' +
+'</div>' +
+'<div class="fg" style="position:relative">' +
+'<label>👤 Client</label>' +
+'<input type="text" id="sclient" placeholder="Rechercher ou taper un nom... (vide = Client Passager)" autocomplete="off" oninput="onClientSrch()" onfocus="onClientSrch()">' +
+'<div id="clac"></div>' +
+'<div class="hint" style="font-size:11px;color:#90A4AE;margin-top:3px">Si le nom tapé ne correspond à aucun client existant, la vente sera enregistrée sous « Client Passager ».</div>' +
+'</div>' +
+
+'<div class="btns">' +
+'<button class="bsave" id="btnSave" onclick="doSave()" disabled>💾  Enregistrer la vente</button>' +
+'<button class="bcancel" onclick="google.script.host.close()">Annuler</button>' +
+'</div>' +
+'<div class="msg" id="msg"></div>' +
+'</div>' +
+
+'<script>' +
+'var prodMap={},prodList=[],cart=[],selProd=null;' +
+'var clientList=[];' +
+'function norm(s){return (s||"").toString().toLowerCase().normalize("NFD").replace(/[\\u0300-\\u036f]/g,"");}' +
+
+'window.onload=function(){' +
+'  var t=new Date(),pad=function(n){return ("0"+n).slice(-2);};' +
+'  document.getElementById("sdate").value=t.getFullYear()+"-"+pad(t.getMonth()+1)+"-"+pad(t.getDate());' +
+'  document.addEventListener("click",function(ev){' +
+'    if(!ev.target.closest("#sprod")&&!ev.target.closest("#aclist"))closeAC();' +
+'    if(!ev.target.closest("#sclient")&&!ev.target.closest("#clac"))document.getElementById("clac").innerHTML="";' +
+'  });' +
+'  loadProducts();' +
+'  google.script.run.withSuccessHandler(function(list){clientList=list||[];}).getAllClients();' +
+'};' +
+
+'function onClientSrch(){' +
+'  var q=norm(document.getElementById("sclient").value.trim());' +
+'  var ac=document.getElementById("clac");' +
+'  if(!q){ac.innerHTML="";return;}' +
+'  var matches=clientList.filter(function(c){return norm(c.nom).indexOf(q)>=0;}).slice(0,8);' +
+'  ac.innerHTML=matches.map(function(c){return \'<div class="clai" data-nom="\'+c.nom+\'" onclick="pickClientBtn(this)">\'+c.nom+(c.telephone?" — "+c.telephone:"")+\'</div>\';}).join("");' +
+'}' +
+'function pickClientBtn(el){document.getElementById("sclient").value=el.getAttribute("data-nom");document.getElementById("clac").innerHTML="";}' +
+
+'function loadProducts(){' +
+'  document.getElementById("selinfo").textContent="Chargement des produits...";' +
+'  google.script.run' +
+'    .withSuccessHandler(function(list){' +
+'      prodList=list||[];prodMap={};' +
+'      for(var i=0;i<prodList.length;i++){prodMap[prodList[i].code]=prodList[i];}' +
+'      document.getElementById("selinfo").textContent=prodList.length+" produits disponibles.";' +
+'    })' +
+'    .withFailureHandler(function(e){document.getElementById("selinfo").textContent="Erreur : "+e.message;})' +
+'    .getAllProducts();' +
+'}' +
+
+'function onSrch(showAll){' +
+'  selProd=null;' +
+'  var q=norm(document.getElementById("sprod").value.trim());' +
+'  var ac=document.getElementById("aclist");' +
+'  if(!q&&!showAll){ac.innerHTML="";return;}' +
+'  var matches=[];' +
+'  for(var i=0;i<prodList.length&&matches.length<10;i++){' +
+'    var p=prodList[i];' +
+'    if(!q||norm(p.code).indexOf(q)>=0||norm(p.designation).indexOf(q)>=0)matches.push(p);' +
+'  }' +
+'  if(!matches.length){ac.innerHTML=\'<div class="aci" style="color:#90A4AE">Aucun résultat</div>\';return;}' +
+'  var html="";' +
+'  for(var j=0;j<matches.length;j++){' +
+'    var p=matches[j];' +
+'    var sc=p.stock<=0?"low":(p.stock<=p.seuil?"low":"ok");' +
+'    var sl=p.stock<=0?"⛔ Rupture":(p.stock<=p.seuil?"⚠️ "+p.stock+" restants":"✅ "+p.stock);' +
+'    html+=\'<div class="aci" data-code="\'+p.code+\'" onclick="pickProd(this)">\'+' +
+'           \'<span><span class="acode">\'+p.code+\'</span>\'+p.designation+\'</span>\'+' +
+'           \'<span class="ast \'+sc+\'">\'+sl+\' — \'+p.prixVente.toFixed(3)+\' DT</span></div>\';' +
+'  }' +
+'  ac.innerHTML=html;' +
+'}' +
+
+'function pickProd(el){' +
+'  var code=el.getAttribute("data-code");' +
+'  selProd=prodMap[code]||null;closeAC();' +
+'  if(!selProd){document.getElementById("selinfo").textContent="Introuvable.";return;}' +
+'  document.getElementById("sprod").value=selProd.code+" — "+selProd.designation;' +
+'  document.getElementById("qinp").max=selProd.stock>0?selProd.stock:9999;' +
+'  document.getElementById("qinp").value=1;' +
+'  document.getElementById("rinp").value=0;' +
+'  var info;' +
+'  if(selProd.stock<=0) info=\'<span style="color:#C62828">⛔ Rupture de stock</span>\';' +
+'  else if(selProd.stock<=selProd.seuil) info=\'<span style="color:#E65100">⚠️ Stock bas (\'+selProd.stock+\') — P.V : \'+selProd.prixVente.toFixed(3)+\' DT</span>\';' +
+'  else info=\'<span style="color:#2E7D32">✅ En stock (\'+selProd.stock+\') — P.V : \'+selProd.prixVente.toFixed(3)+\' DT</span>\';' +
+'  document.getElementById("selinfo").innerHTML=info;' +
+'  document.getElementById("qinp").focus();' +
+'}' +
+'function closeAC(){document.getElementById("aclist").innerHTML="";}' +
+
+'function addToCart(){' +
+'  if(!selProd){showMsg("Sélectionnez un produit dans la liste.","e");return;}' +
+'  var qty=parseInt(document.getElementById("qinp").value)||1;' +
+'  var remise=parseFloat(document.getElementById("rinp").value)||0;' +
+'  if(qty<=0){showMsg("Quantité invalide.","e");return;}' +
+'  if(selProd.stock<=0){showMsg("Produit en rupture de stock.","e");return;}' +
+'  if(qty>selProd.stock){showMsg("Stock insuffisant — max : "+selProd.stock,"e");return;}' +
+'  if(remise<0){showMsg("La remise ne peut pas être négative.","e");return;}' +
+'  if(remise>=selProd.prixVente){showMsg("La remise ne peut pas dépasser le prix de vente ("+selProd.prixVente.toFixed(3)+" DT).","e");return;}' +
+'  var existing=null;' +
+'  for(var i=0;i<cart.length;i++){if(cart[i].code===selProd.code){existing=cart[i];break;}}' +
+'  if(existing){' +
+'    if(existing.qty+qty>selProd.stock){showMsg("Stock insuffisant (total panier).","e");return;}' +
+'    existing.qty+=qty;' +
+'    if(remise>0) existing.remise=remise;' +
+'  }else{' +
+'    cart.push({code:selProd.code,designation:selProd.designation,prixVente:selProd.prixVente,stock:selProd.stock,qty:qty,remise:remise});' +
+'  }' +
+'  renderCart();' +
+'  document.getElementById("sprod").value="";' +
+'  document.getElementById("selinfo").textContent=prodList.length+" produits disponibles.";' +
+'  document.getElementById("qinp").value=1;' +
+'  document.getElementById("rinp").value=0;' +
+'  selProd=null;' +
+'  document.getElementById("msg").className="msg";' +
+'}' +
+
+'function removeItem(idx){cart.splice(idx,1);renderCart();}' +
+
+'function changeQty(idx,val){' +
+'  var q=parseInt(val)||1;' +
+'  if(q<1)q=1;' +
+'  if(q>cart[idx].stock){showMsg("Max : "+cart[idx].stock,"e");document.getElementById("q"+idx).value=cart[idx].qty;return;}' +
+'  cart[idx].qty=q;renderCart();' +
+'}' +
+
+'function changeRemise(idx,val){' +
+'  var r=parseFloat(val)||0;' +
+'  if(r<0)r=0;' +
+'  if(r>=cart[idx].prixVente){showMsg("Remise ≥ prix de vente ("+cart[idx].prixVente.toFixed(3)+" DT).","e");document.getElementById("r"+idx).value=cart[idx].remise;return;}' +
+'  cart[idx].remise=r;renderCart();' +
+'}' +
+
+'function renderCart(){' +
+'  var tbl=document.getElementById("ctable"),em=document.getElementById("empty");' +
+'  var tot=document.getElementById("totals"),btn=document.getElementById("btnSave");' +
+'  var badge=document.getElementById("badge"),body=document.getElementById("cbody");' +
+'  if(!cart.length){' +
+'    tbl.style.display="none";em.style.display="block";' +
+'    tot.style.display="none";btn.disabled=true;badge.style.display="none";return;' +
+'  }' +
+'  tbl.style.display="table";em.style.display="none";' +
+'  tot.style.display="block";btn.disabled=false;' +
+'  badge.style.display="inline-block";badge.textContent=cart.length+" art.";' +
+'  var totalNet=0,totalBrut=0,totalRemiseAmt=0,totalU=0,rows="";' +
+'  for(var i=0;i<cart.length;i++){' +
+'    var it=cart[i];' +
+'    var rem=it.remise||0;' +
+'    var prixNet=Math.max(it.prixVente-rem,0);' +
+'    var lt=prixNet*it.qty;' +
+'    var lb=it.prixVente*it.qty;' +
+'    totalNet+=lt;totalBrut+=lb;totalRemiseAmt+=rem*it.qty;totalU+=it.qty;' +
+'    var remBadge=rem>0?\'<span class="rem-badge">-\'+rem.toFixed(3)+\'</span>\':\'<span style="color:#90A4AE">—</span>\';' +
+'    rows+=\'<tr>\'+' +
+'      \'<td><strong>\'+it.code+\'</strong></td>\'+' +
+'      \'<td>\'+it.designation+\'</td>\'+' +
+'      \'<td style="text-align:right;color:#546E7A">\'+it.prixVente.toFixed(3)+\'</td>\'+' +
+'      \'<td style="text-align:center"><input id="q\'+i+\'" class="ninp" type="number" value="\'+it.qty+\'" min="1" max="\'+it.stock+\'" onchange="changeQty(\'+i+\',this.value)"></td>\'+' +
+'      \'<td style="text-align:center"><input id="r\'+i+\'" class="rinp" type="number" value="\'+rem.toFixed(3)+\'" min="0" step="0.001" max="\'+it.prixVente+\'" onchange="changeRemise(\'+i+\',this.value)"></td>\'+' +
+'      \'<td style="text-align:right;font-weight:700;color:#1A237E">\'+prixNet.toFixed(3)+\'</td>\'+' +
+'      \'<td style="text-align:right;font-weight:700">\'+lt.toFixed(3)+\'</td>\'+' +
+'      \'<td><button class="bdel" onclick="removeItem(\'+i+\')" title="Supprimer">✕</button></td>\'+' +
+'    \'</tr>\';' +
+'  }' +
+'  body.innerHTML=rows;' +
+'  document.getElementById("titems").textContent=totalU+" unité(s)";' +
+'  document.getElementById("tbrut").textContent=totalBrut.toFixed(3)+" DT";' +
+'  document.getElementById("tamount").textContent=totalNet.toFixed(3)+" DT";' +
+'  var remRow=document.getElementById("remrow");' +
+'  if(totalRemiseAmt>0){' +
+'    remRow.style.display="flex";' +
+'    document.getElementById("tremise").textContent="-"+totalRemiseAmt.toFixed(3)+" DT";' +
+'  }else{remRow.style.display="none";}' +
+'}' +
+
+'function doSave(){' +
+'  if(!cart.length){showMsg("Le panier est vide.","e");return;}' +
+'  var date=document.getElementById("sdate").value;' +
+'  if(!date){showMsg("Date obligatoire.","e");return;}' +
+'  var pay=document.getElementById("spay").value;' +
+'  var client=document.getElementById("sclient").value.trim();' +
+'  var btn=document.getElementById("btnSave");' +
+'  btn.disabled=true;btn.textContent="⏳ Enregistrement en cours...";' +
+'  var payload={' +
+'    cart:cart.map(function(i){return {code:i.code,designation:i.designation,prixVente:i.prixVente,qty:i.qty,remise:i.remise||0};}),'+
+'    date:date,payment:pay,client:client' +
+'  };' +
+'  google.script.run' +
+'    .withSuccessHandler(function(r){' +
+'      showMsg(r,"s");cart=[];renderCart();' +
+'      btn.disabled=false;btn.textContent="💾  Enregistrer la vente";' +
+'      document.getElementById("sclient").value="";' +
+'      loadProducts();' +
+'    })' +
+'    .withFailureHandler(function(err){' +
+'      showMsg("Erreur : "+err.message,"e");' +
+'      btn.disabled=false;btn.textContent="💾  Enregistrer la vente";' +
+'    })' +
+'    .saveSale(payload);' +
+'}' +
+
+'function showMsg(t,cls){' +
+'  var el=document.getElementById("msg");el.textContent=t;el.className="msg "+cls;' +
+'  if(cls==="e")setTimeout(function(){if(el.className==="msg e")el.className="msg";},6000);' +
+'}' +
+'<\/script></body></html>';
+}
+
+
+// ============================================================
+//  ★★★ NOUVEAU : DIALOGUE ANNULATION DE VENTE ★★★
+// ============================================================
+function showCancelSaleDialog() {
+  const html = HtmlService.createHtmlOutput(buildCancelSaleDialogHtml())
+    .setWidth(620).setHeight(560).setTitle("Annuler une Vente — Votre Boutique");
+  SpreadsheetApp.getUi().showModalDialog(html, "❌  Annuler une Vente");
+}
+
+function buildCancelSaleDialogHtml() {
+  return '<!DOCTYPE html>' +
+'<html><head><base target="_top"><style>' +
+'*{box-sizing:border-box;margin:0;padding:0;font-family:\'Segoe UI\',Arial,sans-serif}' +
+'body{background:#F5F5F5;padding:16px}' +
+'h2{background:#B71C1C;color:white;padding:14px 18px;border-radius:8px 8px 0 0;font-size:15px}' +
+'.card{background:white;border-radius:0 0 8px 8px;padding:18px;box-shadow:0 2px 8px rgba(0,0,0,.12)}' +
+'.fg{margin-bottom:12px;position:relative}' +
+'label{display:block;font-size:12px;font-weight:600;color:#37474F;margin-bottom:4px}' +
+'input,select{width:100%;padding:8px 10px;border:1.5px solid #CFD8DC;border-radius:5px;font-size:13px;color:#263238}' +
+'input:focus{outline:none;border-color:#B71C1C}' +
+'#aclist{position:absolute;top:100%;left:0;right:0;z-index:9999;background:white;' +
+'border:1.5px solid #B71C1C;border-radius:0 0 6px 6px;max-height:220px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.2)}' +
+'.aci{padding:9px 12px;cursor:pointer;font-size:12px;border-bottom:1px solid #F5F5F5}' +
+'.aci:hover{background:#FFEBEE}' +
+'.aci.annule{color:#BDBDBD;text-decoration:line-through;cursor:not-allowed}' +
+'.aid{font-weight:700;color:#B71C1C;margin-right:8px;min-width:80px;display:inline-block}' +
+'.adate{font-size:11px;color:#90A4AE;margin-right:8px}' +
+'.atot{font-size:11px;font-weight:700;color:#1A237E;float:right}' +
+'.preview{background:#FFF8F8;border:1.5px solid #FFCDD2;border-radius:8px;padding:14px;margin:12px 0;display:none}' +
+'.prev-row{display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid #FFEBEE}' +
+'.prev-row:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0}' +
+'.prev-label{color:#546E7A;font-weight:600}' +
+'.prev-val{color:#263238;font-weight:700}' +
+'.warn{background:#FFF3E0;border-left:4px solid #FF6F00;padding:10px 14px;border-radius:4px;font-size:12px;color:#E65100;margin-bottom:12px}' +
+'.btns{display:flex;gap:10px;margin-top:14px}' +
+'.bcancel-vente{flex:2;padding:10px;background:#B71C1C;color:white;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer}' +
+'.bcancel-vente:disabled{background:#BDBDBD;cursor:default}' +
+'.bcancel-vente:hover:not(:disabled){background:#D32F2F}' +
+'.bclose{flex:1;padding:10px;background:#ECEFF1;color:#546E7A;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer}' +
+'.msg{margin-top:10px;font-size:12px;padding:8px 12px;border-radius:5px;display:none}' +
+'.s{background:#E8F5E9;color:#2E7D32;display:block}' +
+'.e{background:#FFEBEE;color:#C62828;display:block}' +
+'</style></head>' +
+'<body>' +
+'<h2>❌  Annuler une Vente</h2>' +
+'<div class="card">' +
+'<div class="warn">⚠️ L\'annulation restituera le stock au produit et corrigera automatiquement les ventes du jour, le chiffre d\'affaires et le profit.</div>' +
+'<div class="fg">' +
+'<label>Rechercher une vente (ID, Code produit ou Désignation)</label>' +
+'<input type="text" id="srch" placeholder="ex: VTE-012 ou AMH4T ou AMPOUL..." autocomplete="off" oninput="doSearch()" onfocus="doSearch()">' +
+'<div id="aclist"></div>' +
+'</div>' +
+'<div id="preview" class="preview">' +
+'<div class="prev-row"><span class="prev-label">🆔 ID Vente</span><span class="prev-val" id="pId">—</span></div>' +
+'<div class="prev-row"><span class="prev-label">📅 Date</span><span class="prev-val" id="pDate">—</span></div>' +
+'<div class="prev-row"><span class="prev-label">📦 Produit</span><span class="prev-val" id="pProd">—</span></div>' +
+'<div class="prev-row"><span class="prev-label">🔢 Quantité</span><span class="prev-val" id="pQte">—</span></div>' +
+'<div class="prev-row"><span class="prev-label">💰 Total</span><span class="prev-val" id="pTotal">—</span></div>' +
+'<div class="prev-row"><span class="prev-label">💹 Profit</span><span class="prev-val" id="pProfit">—</span></div>' +
+'<div class="prev-row"><span class="prev-label">🏷️ Remise</span><span class="prev-val" id="pRemise">—</span></div>' +
+'<div class="prev-row"><span class="prev-label">💵 Mode de paiement</span><span class="prev-val" id="pPay">—</span></div>' +
+'</div>' +
+'<div class="btns">' +
+'<button class="bcancel-vente" id="btnCancel" onclick="doCancel()" disabled>❌  Confirmer l\'annulation</button>' +
+'<button class="bclose" onclick="google.script.host.close()">Fermer</button>' +
+'</div>' +
+'<div class="msg" id="msg"></div>' +
+'</div>' +
+'<script>' +
+'var salesList=[],selSale=null;' +
+
+'window.onload=function(){' +
+'  document.getElementById("srch").placeholder="Chargement...";' +
+'  google.script.run' +
+'    .withSuccessHandler(function(list){' +
+'      salesList=list||[];' +
+'      document.getElementById("srch").placeholder="ex: VTE-012 ou AMH4T ou AMPOUL...";' +
+'    })' +
+'    .withFailureHandler(function(e){document.getElementById("srch").placeholder="Erreur : "+e.message;})' +
+'    .getActiveSales();' +
+'  document.addEventListener("click",function(ev){' +
+'    if(!ev.target.closest("#srch")&&!ev.target.closest("#aclist"))closeAC();' +
+'  });' +
+'};' +
+
+'function norm(s){return (s||"").toString().toLowerCase().normalize("NFD").replace(/[\\u0300-\\u036f]/g,"");}' +
+'function doSearch(){' +
+'  selSale=null;' +
+'  document.getElementById("btnCancel").disabled=true;' +
+'  document.getElementById("preview").style.display="none";' +
+'  var q=norm(document.getElementById("srch").value.trim());' +
+'  var ac=document.getElementById("aclist");' +
+'  if(!q){ac.innerHTML="";return;}' +
+'  var matches=[];' +
+'  for(var i=0;i<salesList.length&&matches.length<12;i++){' +
+'    var s=salesList[i];' +
+'    if(norm(s.id).indexOf(q)>=0||norm(s.code).indexOf(q)>=0||norm(s.designation).indexOf(q)>=0)' +
+'      matches.push(s);' +
+'  }' +
+'  if(!matches.length){ac.innerHTML=\'<div class="aci" style="color:#90A4AE">Aucune vente trouvée</div>\';return;}' +
+'  var html="";' +
+'  for(var j=0;j<matches.length;j++){' +
+'    var s=matches[j];' +
+'    var cls=s.annule?"aci annule":"aci";' +
+'    var tag=s.annule?\'<span style="color:#BDBDBD;font-size:10px"> [ANNULÉ]</span>\':"";' +
+'    html+=\'<div class="\'+cls+\'" data-row="\'+s.row+\'" onclick="pickSale(this)">\'+' +
+'          \'<span class="aid">\'+s.id+\'</span>\'+' +
+'          \'<span class="adate">\'+s.date+\'</span>\'+' +
+'          s.code+\' — \'+s.designation+\' × \'+s.qty+tag+' +
+'          \'<span class="atot">\'+s.total.toFixed(3)+\' DT</span>\'+' +
+'          \'</div>\';' +
+'  }' +
+'  ac.innerHTML=html;' +
+'}' +
+
+'function pickSale(el){' +
+'  if(el.classList.contains("annule")){showMsg("Cette vente est déjà annulée.","e");closeAC();return;}' +
+'  var row=parseInt(el.getAttribute("data-row"));' +
+'  selSale=null;' +
+'  for(var i=0;i<salesList.length;i++){if(salesList[i].row===row){selSale=salesList[i];break;}}' +
+'  closeAC();' +
+'  if(!selSale){showMsg("Vente introuvable.","e");return;}' +
+'  document.getElementById("srch").value=selSale.id+" — "+selSale.designation;' +
+'  document.getElementById("pId").textContent=selSale.id;' +
+'  document.getElementById("pDate").textContent=selSale.date;' +
+'  document.getElementById("pProd").textContent=selSale.code+" — "+selSale.designation;' +
+'  document.getElementById("pQte").textContent=selSale.qty+" unité(s)";' +
+'  document.getElementById("pTotal").textContent=selSale.total.toFixed(3)+" DT";' +
+'  document.getElementById("pProfit").textContent=selSale.profit.toFixed(3)+" DT";' +
+'  document.getElementById("pRemise").textContent=selSale.remise>0?selSale.remise.toFixed(3)+" DT / unité":"—";' +
+'  document.getElementById("pPay").textContent=selSale.payment;' +
+'  document.getElementById("preview").style.display="block";' +
+'  document.getElementById("btnCancel").disabled=false;' +
+'}' +
+
+'function closeAC(){document.getElementById("aclist").innerHTML="";}' +
+
+'function doCancel(){' +
+'  if(!selSale){showMsg("Sélectionnez d\'abord une vente.","e");return;}' +
+'  var btn=document.getElementById("btnCancel");' +
+'  btn.disabled=true;btn.textContent="⏳ Annulation en cours...";' +
+'  google.script.run' +
+'    .withSuccessHandler(function(r){' +
+'      showMsg(r,"s");' +
+'      btn.textContent="❌  Confirmer l\'annulation";' +
+// Retirer la vente annulée de la liste locale
+'      salesList=salesList.filter(function(s){return s.row!==selSale.row;});' +
+'      selSale=null;' +
+'      document.getElementById("srch").value="";' +
+'      document.getElementById("preview").style.display="none";' +
+'    })' +
+'    .withFailureHandler(function(err){' +
+'      showMsg("Erreur : "+err.message,"e");' +
+'      btn.disabled=false;btn.textContent="❌  Confirmer l\'annulation";' +
+'    })' +
+'    .cancelSale(selSale.row);' +
+'}' +
+
+'function showMsg(t,cls){' +
+'  var el=document.getElementById("msg");el.textContent=t;el.className="msg "+cls;' +
+'}' +
+'<\/script></body></html>';
+}
+
+
+// ============================================================
+//  ★★★ NOUVEAU : DIALOGUE CLIENT / FOURNISSEUR ★★★
+// ============================================================
+function showAddClientSupplierDialog() {
+  const html = HtmlService.createHtmlOutput(buildClientSupplierDialogHtml())
+    .setWidth(460).setHeight(560).setTitle("Client / Fournisseur — Votre Boutique");
+  SpreadsheetApp.getUi().showModalDialog(html, "👤  Ajouter un Client / Fournisseur");
+}
+
+function buildClientSupplierDialogHtml() {
+  return '<!DOCTYPE html>' +
+'<html><head><base target="_top"><style>' +
+'*{box-sizing:border-box;margin:0;padding:0;font-family:\'Segoe UI\',Arial,sans-serif}' +
+'body{background:#F5F5F5;padding:16px}' +
+'h2{background:#1A237E;color:white;padding:14px 16px;border-radius:8px 8px 0 0;font-size:15px}' +
+'.card{background:white;border-radius:0 0 8px 8px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,.1)}' +
+'.tabs{display:flex;gap:8px;margin-bottom:14px}' +
+'.tab{flex:1;padding:8px;border:2px solid #B0BEC5;background:white;color:#546E7A;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer}' +
+'.tab.on{border-color:#1A237E;background:#E8EAF6;color:#1A237E}' +
+'.fg{margin-bottom:13px;position:relative}' +
+'label{display:block;font-size:12px;font-weight:600;color:#37474F;margin-bottom:4px}' +
+'input,select{width:100%;padding:8px 10px;border:1.5px solid #CFD8DC;border-radius:5px;font-size:13px;color:#263238}' +
+'input:focus,select:focus{outline:none;border-color:#1A237E}' +
+'.hint{font-size:11px;color:#90A4AE;margin-top:3px}' +
+'.btns{display:flex;gap:10px;margin-top:16px}' +
+'.bs{flex:2;padding:10px;background:#FF6F00;color:white;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer}' +
+'.bs:disabled{background:#BDBDBD;cursor:default}' +
+'.bc{flex:1;padding:10px;background:#ECEFF1;color:#546E7A;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer}' +
+'.msg{margin-top:12px;font-size:12px;padding:8px 12px;border-radius:5px;display:none}' +
+'.s{background:#E8F5E9;color:#2E7D32;display:block}' +
+'.e{background:#FFEBEE;color:#C62828;display:block}' +
+'#aclist{position:absolute;top:100%;left:0;right:0;z-index:9999;background:white;border:1.5px solid #1A237E;' +
+'border-radius:0 0 6px 6px;max-height:160px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.2)}' +
+'.aci{padding:8px 12px;cursor:pointer;font-size:12px;border-bottom:1px solid #F5F5F5}' +
+'.aci:hover{background:#E8EAF6}' +
+'</style></head><body>' +
+'<h2>👤  Client / Fournisseur</h2>' +
+'<div class="card">' +
+'<div class="tabs">' +
+'<button class="tab on" id="tc" onclick="setMode(\'client\')">🙋 Client</button>' +
+'<button class="tab" id="tf" onclick="setMode(\'supplier\')">🏭 Fournisseur</button>' +
+'</div>' +
+
+'<div id="clientForm">' +
+'<div class="fg"><label>Nom du Client *</label><input type="text" id="cnom" placeholder="ex: Ahmed Ben Salah"></div>' +
+'<div class="fg"><label>Téléphone</label><input type="text" id="ctel" placeholder="ex: 20 123 456"></div>' +
+'<div class="fg"><label>Adresse</label><input type="text" id="cadr" placeholder="ex: Tunis, Tunisie"></div>' +
+'</div>' +
+
+'<div id="supplierForm" style="display:none">' +
+'<div class="fg"><label>Nom du Fournisseur *</label><input type="text" id="fnom" placeholder="ex: Pièces Sfax SARL"></div>' +
+'<div class="fg"><label>Téléphone</label><input type="text" id="ftel" placeholder="ex: 74 123 456"></div>' +
+'<div class="fg"><label>Adresse</label><input type="text" id="fadr" placeholder="ex: Sfax, Tunisie"></div>' +
+'<div class="fg">' +
+'<label>Produit associé (Code ou Désignation) — optionnel</label>' +
+'<input type="text" id="fprod" placeholder="Tapez pour rechercher..." autocomplete="off" oninput="doSearch()">' +
+'<div id="aclist"></div>' +
+'<div class="hint">Facultatif : liez un article dès maintenant, ou enregistrez le fournisseur seul et liez-le plus tard.</div>' +
+'</div>' +
+'<div class="fg"><label>Prix Fournisseur (DT)</label><input type="number" id="fprix" placeholder="0.000" step="0.001" min="0"></div>' +
+'</div>' +
+
+'<div class="btns">' +
+'<button class="bs" id="btnS" onclick="doSave()">💾  Enregistrer</button>' +
+'<button class="bc" onclick="google.script.host.close()">Fermer</button>' +
+'</div>' +
+'<div class="msg" id="msg"></div>' +
+'</div>' +
+'<script>' +
+'var mode="client";var prodList=[],selCode="";' +
+'window.onload=function(){' +
+'  google.script.run.withSuccessHandler(function(list){prodList=list||[];}).getAllProducts();' +
+'};' +
+'function setMode(m){' +
+'  mode=m;' +
+'  document.getElementById("tc").className="tab"+(m==="client"?" on":"");' +
+'  document.getElementById("tf").className="tab"+(m==="supplier"?" on":"");' +
+'  document.getElementById("clientForm").style.display=m==="client"?"block":"none";' +
+'  document.getElementById("supplierForm").style.display=m==="supplier"?"block":"none";' +
+'  document.getElementById("msg").className="msg";' +
+'}' +
+'function norm(s){return (s||"").toString().toLowerCase().normalize("NFD").replace(/[\\u0300-\\u036f]/g,"");}' +
+'function doSearch(){' +
+'  selCode="";' +
+'  var q=norm(document.getElementById("fprod").value.trim());' +
+'  var ac=document.getElementById("aclist");' +
+'  if(!q){ac.innerHTML="";return;}' +
+'  var matches=[];' +
+'  for(var i=0;i<prodList.length&&matches.length<8;i++){' +
+'    var p=prodList[i];' +
+'    if(norm(p.code).indexOf(q)>=0||norm(p.designation).indexOf(q)>=0)matches.push(p);' +
+'  }' +
+'  if(!matches.length){ac.innerHTML=\'<div class="aci" style="color:#90A4AE">Aucun résultat</div>\';return;}' +
+'  var html="";' +
+'  for(var j=0;j<matches.length;j++){' +
+'    var p=matches[j];' +
+'    html+=\'<div class="aci" data-code="\'+p.code+\'" data-desig="\'+p.designation+\'" onclick="pickBtn(this)">\'+p.code+\' — \'+p.designation+\'</div>\';' +
+'  }' +
+'  ac.innerHTML=html;' +
+'}' +
+'function pickBtn(el){pick(el.getAttribute("data-code"),el.getAttribute("data-desig"));}' +
+'function pick(code,desig){' +
+'  selCode=code;' +
+'  document.getElementById("fprod").value=code+" — "+desig;' +
+'  document.getElementById("aclist").innerHTML="";' +
+'}' +
+'function doSave(){' +
+'  var btn=document.getElementById("btnS");' +
+'  btn.disabled=true;btn.textContent="⏳ Enregistrement...";' +
+'  if(mode==="client"){' +
+'    var nom=document.getElementById("cnom").value.trim();' +
+'    if(!nom){showMsg("Le nom du client est obligatoire.","e");resetBtn();return;}' +
+'    google.script.run.withSuccessHandler(function(r){showMsg(r,"s");resetBtn();document.getElementById("cnom").value="";document.getElementById("ctel").value="";document.getElementById("cadr").value="";})' +
+'      .withFailureHandler(function(err){showMsg("Erreur : "+err.message,"e");resetBtn();})' +
+'      .saveClient({nom:nom,telephone:document.getElementById("ctel").value,adresse:document.getElementById("cadr").value});' +
+'  }else{' +
+'    var fnom=document.getElementById("fnom").value.trim();' +
+'    var fprix=parseFloat(document.getElementById("fprix").value)||0;' +
+'    if(!fnom){showMsg("Le nom du fournisseur est obligatoire.","e");resetBtn();return;}' +
+'    if(selCode&&fprix<=0){showMsg("Indiquez un prix fournisseur valide pour l\'article sélectionné.","e");resetBtn();return;}' +
+'    google.script.run.withSuccessHandler(function(r){showMsg(r,"s");resetBtn();})' +
+'      .withFailureHandler(function(err){showMsg("Erreur : "+err.message,"e");resetBtn();})' +
+'      .saveSupplier({nom:fnom,telephone:document.getElementById("ftel").value,adresse:document.getElementById("fadr").value,codeProduit:selCode,prixFournisseur:fprix});' +
+'  }' +
+'}' +
+'function resetBtn(){var btn=document.getElementById("btnS");btn.disabled=false;btn.textContent="💾  Enregistrer";}' +
+'function showMsg(t,cls){var el=document.getElementById("msg");el.textContent=t;el.className="msg "+cls;}' +
+'<\/script></body></html>';
+}
+
+// ============================================================
+//  ★★★ NOUVEAU : DIALOGUE COMMANDE FOURNISSEUR ★★★
+// ============================================================
+function showOrderDialog() {
+  const html = HtmlService.createHtmlOutput(buildOrderDialogHtml())
+    .setWidth(760).setHeight(680).setTitle("Commande Fournisseur — Votre Boutique");
+  SpreadsheetApp.getUi().showModalDialog(html, "📦  Créer une Commande Fournisseur");
+}
+
+function buildOrderDialogHtml() {
+  return '<!DOCTYPE html>' +
+'<html><head><base target="_top"><style>' +
+'*{box-sizing:border-box;margin:0;padding:0;font-family:\'Segoe UI\',Arial,sans-serif}' +
+'body{background:#F5F5F5;padding:12px}' +
+'h2{background:#283593;color:white;padding:12px 16px;border-radius:8px 8px 0 0;font-size:15px}' +
+'.card{background:white;border-radius:0 0 8px 8px;padding:16px;box-shadow:0 2px 8px rgba(0,0,0,.1)}' +
+'.fg{margin-bottom:10px;position:relative}' +
+'label{display:block;font-size:12px;font-weight:600;color:#37474F;margin-bottom:4px}' +
+'input{width:100%;padding:8px 10px;border:1.5px solid #CFD8DC;border-radius:5px;font-size:13px;color:#263238}' +
+'#aclist{position:absolute;top:100%;left:0;right:0;z-index:9999;background:white;border:1.5px solid #283593;border-radius:0 0 6px 6px;max-height:160px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.2)}' +
+'.aci{padding:8px 12px;cursor:pointer;font-size:12px;border-bottom:1px solid #F5F5F5}' +
+'.aci:hover{background:#E8EAF6}' +
+'table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}' +
+'thead tr{background:#283593;color:white}' +
+'th{padding:6px;text-align:left}' +
+'td{padding:5px 6px;border-bottom:1px solid #ECEFF1;vertical-align:middle}' +
+'td input{padding:4px 6px;font-size:12px}' +
+'.bo{background:#1A237E;color:white;border:none;border-radius:5px;padding:6px 10px;font-size:11px;font-weight:700;cursor:pointer}' +
+'.bo:hover{background:#283593}' +
+'.bx{background:#FFEBEE;color:#C62828;border:none;border-radius:5px;padding:4px 8px;font-weight:700;cursor:pointer}' +
+'.best{background:#E8F5E9;font-weight:700;color:#1B5E20}' +
+'.msg{margin-top:10px;font-size:12px;padding:8px 12px;border-radius:5px;display:none}' +
+'.s{background:#E8F5E9;color:#2E7D32;display:block}' +
+'.e{background:#FFEBEE;color:#C62828;display:block}' +
+'.cart{margin-top:14px;border:2px solid #283593;border-radius:8px;padding:10px;background:#FAFAFF}' +
+'.cart h3{font-size:13px;color:#1A237E;margin-bottom:4px}' +
+'.tot{text-align:right;font-weight:700;font-size:14px;color:#1A237E;margin-top:8px}' +
+'.acts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}' +
+'.acts button{padding:10px 6px;border:none;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;color:white}' +
+'.v{background:#2E7D32}.p{background:#1565C0}.d{background:#C62828}' +
+'.acts button:disabled{opacity:.5;cursor:wait}' +
+'.bc{margin-top:12px;width:100%;padding:9px;background:#ECEFF1;color:#546E7A;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer}' +
+'.hint{font-size:11px;color:#90A4AE;margin:6px 0 0}' +
+'</style></head><body>' +
+'<h2>📦  Créer une Commande Fournisseur</h2>' +
+'<div class="card">' +
+'<div class="fg"><label>Rechercher un produit (Code ou Désignation)</label>' +
+'<input type="text" id="sprod" placeholder="Tapez pour rechercher, ou cliquez pour voir tous les produits..." autocomplete="off" oninput="onSrch()" onfocus="onSrch(true)">' +
+'<div id="aclist"></div></div>' +
+'<div id="cmpZone"></div>' +
+'<div class="cart"><h3>🧺 Panier de commande</h3><div id="cartZone"></div></div>' +
+'<div class="msg" id="msg"></div>' +
+'<button class="bc" onclick="google.script.host.close()">Fermer</button>' +
+'</div>' +
+'<script>(' + orderDialogClient_.toString() + ')();<\/script></body></html>';
+}
+
+/** Script client du dialogue Commande (injecté tel quel dans la page). */
+function orderDialogClient_() {
+  var prodList = [], cart = [], curCode = "", curDesig = "", curSup = [], orderId = "";
+  function $(id) { return document.getElementById(id); }
+  function norm(s) { return (s || "").toString().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, ""); }
+  function esc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+  function showMsg(t, cls) { var el = $("msg"); el.textContent = t; el.className = "msg " + cls; }
+
+  window.onSrch = function (showAll) {
+    var q = norm($("sprod").value.trim()), ac = $("aclist");
+    if (!q && !showAll) { ac.innerHTML = ""; return; }
+    var m = [];
+    for (var i = 0; i < prodList.length && m.length < 30; i++) {
+      var p = prodList[i];
+      if (!q || norm(p.code).indexOf(q) >= 0 || norm(p.designation).indexOf(q) >= 0) m.push(i);
+    }
+    ac.innerHTML = m.map(function (i) {
+      return '<div class="aci" data-i="' + i + '" onclick="pickProd(this)">' + esc(prodList[i].code) + ' — ' + esc(prodList[i].designation) + '</div>';
+    }).join("") || '<div class="aci">Aucun résultat</div>';
+  };
+  window.pickProd = function (el) {
+    var p = prodList[parseInt(el.getAttribute("data-i"))];
+    $("aclist").innerHTML = "";
+    $("sprod").value = p.code;
+    curCode = p.code; curDesig = p.designation;
+    $("cmpZone").innerHTML = "Chargement des fournisseurs...";
+    google.script.run.withSuccessHandler(renderCmp)
+      .withFailureHandler(function (e) { $("cmpZone").textContent = "Erreur : " + e.message; })
+      .getSuppliersForProduct(p.code);
+  };
+  function renderCmp(list) {
+    curSup = list || [];
+    var z = $("cmpZone");
+    if (!curSup.length) { z.innerHTML = '<p class="hint">Aucun fournisseur enregistré pour ce produit. Ajoutez-en via 👤 Ajouter un Client / Fournisseur.</p>'; return; }
+    var rows = "";
+    for (var i = 0; i < curSup.length; i++) {
+      var f = curSup[i];
+      rows += '<tr class="' + (i === 0 ? "best" : "") + '"><td>' + (i === 0 ? "🥇 " : "") + esc(f.nom) + '</td><td>' + Number(f.prixFournisseur).toFixed(3) +
+        ' DT</td><td><input type="number" id="q' + i + '" value="1" min="1" style="width:60px"></td>' +
+        '<td><button class="bo" data-idx="' + i + '" onclick="addCart(this)">➕ Ajouter au panier</button></td></tr>';
+    }
+    z.innerHTML = '<p class="hint">Prix d\'achat par fournisseur, du moins cher (🥇) au plus cher :</p><table><thead><tr><th>Fournisseur</th><th>Prix d\'Achat</th><th>Qté</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+  window.addCart = function (btn) {
+    var f = curSup[parseInt(btn.getAttribute("data-idx"))];
+    var q = parseInt($("q" + btn.getAttribute("data-idx")).value) || 1;
+    if (q < 1) q = 1;
+    var found = false;
+    for (var i = 0; i < cart.length; i++) {
+      if (cart[i].code === curCode && cart[i].fournisseur === f.nom) { cart[i].qte += q; found = true; break; }
+    }
+    if (!found) cart.push({ code: curCode, designation: curDesig, fournisseur: f.nom, prix: Number(f.prixFournisseur), qte: q });
+    orderId = "";
+    renderCart();
+    showMsg("🧺 " + curDesig + " ajouté au panier (" + q + " × " + f.nom + ").", "s");
+  };
+  window.setQty = function (i, v) {
+    var q = parseInt(v) || 1; cart[i].qte = q < 1 ? 1 : q; orderId = ""; renderCart();
+  };
+  window.delLine = function (i) { cart.splice(i, 1); orderId = ""; renderCart(); };
+  window.clearCart = function () { cart = []; orderId = ""; renderCart(); };
+  function total() { var t = 0; cart.forEach(function (l) { t += l.prix * l.qte; }); return t; }
+  function renderCart() {
+    var z = $("cartZone");
+    if (!cart.length) { z.innerHTML = '<p class="hint">Le panier est vide. Recherchez un produit puis cliquez sur « ➕ Ajouter au panier ».</p>'; return; }
+    var rows = cart.map(function (l, i) {
+      return '<tr><td>' + esc(l.code) + '</td><td>' + esc(l.designation) + '</td><td>' + esc(l.fournisseur) + '</td><td>' + l.prix.toFixed(3) +
+        '</td><td><input type="number" min="1" value="' + l.qte + '" style="width:58px" onchange="setQty(' + i + ',this.value)"></td><td>' +
+        (l.prix * l.qte).toFixed(3) + '</td><td><button class="bx" title="Retirer" onclick="delLine(' + i + ')">✕</button></td></tr>';
+    }).join("");
+    z.innerHTML = '<table><thead><tr><th>Code</th><th>Désignation</th><th>Fournisseur</th><th>Prix</th><th>Qté</th><th>Total</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>' +
+      '<div class="tot">Total : ' + total().toFixed(3) + ' DT' + (orderId ? ' — N° ' + esc(orderId) : '') + '</div>' +
+      '<div class="acts"><button class="v" id="bV" onclick="validateCart()">✅ Valider la commande</button>' +
+      '<button class="p" id="bP" onclick="printCart()">🖨️ Imprimer</button>' +
+      '<button class="d" id="bD" onclick="pdfCart()">📄 Télécharger PDF</button></div>' +
+      '<p class="hint" style="text-align:right"><a href="#" onclick="clearCart();return false">Vider le panier</a></p>';
+  }
+  function busy(on) { ["bV", "bP", "bD"].forEach(function (id) { if ($(id)) $(id).disabled = on; }); }
+  window.validateCart = function () {
+    if (!cart.length) return;
+    busy(true);
+    google.script.run.withSuccessHandler(function (r) {
+      orderId = r.id; renderCart();
+      showMsg("✅ Commande " + r.id + " enregistrée (" + r.count + " ligne(s), " + r.total.toFixed(3) + " DT) dans « Page 8 : Commandes ».", "s");
+    }).withFailureHandler(function (e) { busy(false); showMsg("Erreur : " + e.message, "e"); }).createOrderCart(cart);
+  };
+  window.printCart = function () {
+    if (!cart.length) return;
+    busy(true);
+    google.script.run.withSuccessHandler(function (html) {
+      busy(false);
+      var w = null;
+      try { w = window.open("", "_blank"); } catch (e) {}
+      if (!w) { showMsg("Impression bloquée par le navigateur : utilisez « Télécharger PDF » puis imprimez le PDF.", "e"); return; }
+      w.document.open(); w.document.write(html); w.document.close();
+      setTimeout(function () { try { w.focus(); w.print(); } catch (e) {} }, 400);
+    }).withFailureHandler(function (e) { busy(false); showMsg("Erreur : " + e.message, "e"); }).getOrderPrintHtml(cart, orderId);
+  };
+  window.pdfCart = function () {
+    if (!cart.length) return;
+    busy(true);
+    google.script.run.withSuccessHandler(function (r) {
+      busy(false);
+      var a = document.createElement("a");
+      a.href = "data:application/pdf;base64," + r.b64; a.download = r.name;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      showMsg("📄 PDF généré : " + r.name, "s");
+    }).withFailureHandler(function (e) { busy(false); showMsg("Erreur PDF : " + e.message, "e"); }).getOrderPdf(cart, orderId);
+  };
+  window.onload = function () {
+    google.script.run.withSuccessHandler(function (l) { prodList = l || []; }).getAllProducts();
+    document.addEventListener("click", function (ev) {
+      if (!ev.target.closest("#sprod") && !ev.target.closest("#aclist")) $("aclist").innerHTML = "";
+    });
+    renderCart();
+  };
+}
+
+/** Crée toutes les lignes du panier sous UN SEUL numéro de commande. */
+function createOrderCart(lines) {
+  if (!lines || !lines.length) throw new Error("Le panier est vide.");
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const s = ensureOrdersSheet(ss);
+  let maxId = 0;
+  const last = s.getLastRow();
+  if (last >= 2) {
+    s.getRange(2, 1, last - 1, 1).getValues().forEach(r => {
+      const m = String(r[0]).match(/CMD-(\d+)/);
+      if (m) maxId = Math.max(maxId, parseInt(m[1]));
+    });
+  }
+  const id = "CMD-" + String(maxId + 1).padStart(3, "0");
+  const now = new Date();
+  let total = 0;
+  const rows = lines.map(l => {
+    const prod = findProduct(l.code) || { designation: l.designation || "Produit inconnu" };
+    const qte = Math.max(parseInt(l.qte) || 1, 1);
+    const prix = Number(l.prix) || 0;
+    total += prix * qte;
+    return [id, now, l.fournisseur, l.code, prod.designation, qte, prix, prix * qte, "En attente"];
+  });
+  const start = s.getLastRow() + 1;
+  s.getRange(start, 1, rows.length, 9).setValues(rows);
+  s.getRange(start, 2, rows.length, 1).setNumberFormat("DD/MM/YYYY");
+  s.getRange(start, 7, rows.length, 2).setNumberFormat('#,##0.000 " DT"');
+  return { id: id, count: rows.length, total: total };
+}
+
+/** Bon de commande HTML (imprimable), groupé par fournisseur. */
+function getOrderPrintHtml(lines, orderId) {
+  const esc = s => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const groups = {};
+  (lines || []).forEach(l => { (groups[l.fournisseur] = groups[l.fournisseur] || []).push(l); });
+  const date = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd/MM/yyyy");
+  let grand = 0, body = "";
+  Object.keys(groups).forEach(f => {
+    let sub = 0, rows = "";
+    groups[f].forEach(l => {
+      const q = Math.max(parseInt(l.qte) || 1, 1), p = Number(l.prix) || 0;
+      sub += p * q;
+      rows += "<tr><td>" + esc(l.code) + "</td><td>" + esc(l.designation) + "</td><td class='n'>" + q +
+        "</td><td class='n'>" + p.toFixed(3) + "</td><td class='n'>" + (p * q).toFixed(3) + "</td></tr>";
+    });
+    grand += sub;
+    body += "<h3>Fournisseur : " + esc(f) + "</h3><table><thead><tr><th>Code</th><th>Désignation</th><th>Qté</th><th>Prix (DT)</th><th>Total (DT)</th></tr></thead><tbody>" +
+      rows + "</tbody><tfoot><tr><td colspan='4' class='n'>Sous-total</td><td class='n'>" + sub.toFixed(3) + "</td></tr></tfoot></table>";
+  });
+  return "<!DOCTYPE html><html><head><meta charset='utf-8'><style>" +
+    "body{font-family:Arial,sans-serif;font-size:12px;color:#222;margin:24px}" +
+    "h1{font-size:20px;color:#1A237E;margin:0}h3{margin:18px 0 4px;font-size:13px;color:#1A237E}" +
+    ".top{display:flex;justify-content:space-between;border-bottom:2px solid #1A237E;padding-bottom:8px;margin-bottom:6px}" +
+    "table{width:100%;border-collapse:collapse}th{background:#283593;color:#fff;text-align:left;padding:5px}" +
+    "td{padding:5px;border-bottom:1px solid #ddd}.n{text-align:right}tfoot td{font-weight:bold;border-top:1px solid #999}" +
+    ".g{text-align:right;font-size:15px;font-weight:bold;margin-top:16px;color:#1A237E}" +
+    "</style></head><body><div class='top'><div><h1>BON DE COMMANDE</h1><div>Votre Boutique</div></div>" +
+    "<div style='text-align:right'><div><b>N° : " + esc(orderId || "Brouillon") + "</b></div><div>Date : " + date + "</div></div></div>" +
+    body + "<div class='g'>TOTAL GÉNÉRAL : " + grand.toFixed(3) + " DT</div></body></html>";
+}
+
+/** Bon de commande en PDF (base64) pour téléchargement. */
+function getOrderPdf(lines, orderId) {
+  const html = getOrderPrintHtml(lines, orderId);
+  const name = "Bon_de_commande_" + (orderId || "brouillon") + ".pdf";
+  const blob = Utilities.newBlob(html, "text/html", "bc.html").getAs("application/pdf").setName(name);
+  return { name: name, b64: Utilities.base64Encode(blob.getBytes()) };
+}
+
+
+// ============================================================
+
+/**
+ * Retourne la liste des ventes ACTIVES (non annulées) pour le dialog d'annulation.
+ */
+function getActiveSales() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const salesSheet = ss.getSheetByName(SHEET_SALES);
+  if (!salesSheet) return [];
+
+  const lastRow = salesSheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  const data = salesSheet.getRange(2, 1, lastRow - 1, 12).getValues();
+  const result = [];
+
+  data.forEach((row, i) => {
+    if (!row[0] || !row[2]) return; // Ligne vide
+    const statut = String(row[10]).trim().toUpperCase();
+    // Formater la date
+    let dateStr = "";
+    if (row[1]) {
+      try {
+        dateStr = Utilities.formatDate(new Date(row[1]), Session.getScriptTimeZone(), "dd/MM/yyyy");
+      } catch(e) { dateStr = String(row[1]); }
+    }
+    result.push({
+      row:         i + 2,              // numéro de ligne réel dans la feuille
+      id:          String(row[0]),     // col A : ID vente
+      date:        dateStr,            // col B : date formatée
+      code:        String(row[2]),     // col C : code produit
+      designation: String(row[3]),     // col D : désignation
+      prixNet:     Number(row[4]) || 0,// col E : prix net
+      qty:         Number(row[5]) || 0,// col F : quantité
+      total:       Number(row[6]) || 0,// col G : total
+      payment:     String(row[7]),     // col H : mode paiement
+      profit:      Number(row[8]) || 0,// col I : profit
+      remise:      Number(row[9]) || 0,// col J : remise
+      annule:      statut === "ANNULÉ",// col K : statut
+      client:      String(row[11] || "Client Passager") // col L : client ★
+    });
+  });
+
+  // Trier par date décroissante (plus récent en premier)
+  result.sort(function(a, b) { return b.row - a.row; });
+  return result;
+}
+
+/**
+ * ★ FONCTION PRINCIPALE : Annule une vente.
+ * - Marque la ligne comme ANNULÉ (col K)
+ * - Applique un fond grisé et barré
+ * - Le stock est automatiquement recalculé via updateDashboardValues()
+ *   qui exclut les lignes ANNULÉ du qteVendueMap
+ */
+function cancelSale(rowNum) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const salesSheet = ss.getSheetByName(SHEET_SALES);
+  if (!salesSheet) throw new Error("Feuille Ventes introuvable.");
+
+  const lastRow = salesSheet.getLastRow();
+  if (rowNum < 2 || rowNum > lastRow) throw new Error("Numéro de ligne invalide : " + rowNum);
+
+  // Lire la ligne
+  const rowData = salesSheet.getRange(rowNum, 1, 1, 12).getValues()[0];
+  const idVente    = String(rowData[0]);
+  const codeP      = String(rowData[2]);
+  const designation= String(rowData[3]);
+  const qty        = Number(rowData[5]) || 0;
+  const total      = Number(rowData[6]) || 0;
+  const profit     = Number(rowData[8]) || 0;
+  const statutActuel = String(rowData[10]).trim().toUpperCase();
+
+  // Vérification : déjà annulée ?
+  if (statutActuel === "ANNULÉ") {
+    throw new Error("La vente " + idVente + " est déjà annulée.");
+  }
+
+  // ★ Marquer comme ANNULÉ dans la col K (index 11, colonne 11)
+  salesSheet.getRange(rowNum, 11).setValue("ANNULÉ");
+
+  // Formatage visuel : texte grisé + fond rose pâle
+  salesSheet.getRange(rowNum, 1, 1, 12)
+    .setBackground("#FFF5F5")
+    .setFontColor("#BDBDBD");
+
+  SpreadsheetApp.flush();
+
+  // ★ Recalculer le tableau de bord — le stock est automatiquement restauré
+  // car updateDashboardValues() exclut les lignes ANNULÉ du qteVendueMap
+  updateDashboardValues();
+
+  return "✅  Vente " + idVente + " annulée !\n" +
+         "Produit : " + designation + " (" + codeP + ")\n" +
+         "Quantité restituée au stock : " + qty + " unité(s)\n" +
+         "Montant retiré des ventes : " + total.toFixed(3) + " DT\n" +
+         "Profit corrigé : -" + profit.toFixed(3) + " DT\n" +
+         "Le Tableau de Bord a été mis à jour automatiquement.";
+}
+
+
+// ============================================================
+//  12. FONCTIONS SERVEUR PRODUITS & VENTES
+// ============================================================
+
+function findProduct(query) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_PRODUCTS);
+  if (!sheet) return null;
+  const data = sheet.getDataRange().getValues();
+  const q = query.toLowerCase();
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    if (!r[0]) continue;
+    if (String(r[0]).toLowerCase().includes(q) || String(r[1]).toLowerCase().includes(q)) {
+      return { code:String(r[0]), designation:String(r[1]), categorie:String(r[2]),
+               prixAchat:Number(r[3])||0, prixVente:Number(r[4])||0,
+               stockInitial:Number(r[5])||0, seuil:Number(r[8])||0 };
+    }
+  }
+  return null;
+}
+
+/**
+ * ★ Met à jour la colonne "Prix d'Achat (DT)" d'un produit (Page 2, col D)
+ * avec le prix fournisseur le PLUS ÉLEVÉ parmi tous les fournisseurs liés à ce code produit.
+ */
+function recalcProductPurchasePrice(code) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_PRODUCTS);
+  if (!sheet) return;
+
+  const suppSheet = ss.getSheetByName(SHEET_SUPPLIERS);
+  let maxPrix = 0;
+  if (suppSheet) {
+    const last = suppSheet.getLastRow();
+    if (last >= 2) {
+      const rows = suppSheet.getRange(2, 1, last - 1, 5).getValues();
+      rows.forEach(r => {
+        if (String(r[3]).toLowerCase() === String(code).toLowerCase()) {
+          maxPrix = Math.max(maxPrix, Number(r[4]) || 0);
+        }
+      });
+    }
+  }
+  if (maxPrix <= 0) return; // aucun fournisseur avec prix connu : on ne touche pas au prix existant
+
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]).toLowerCase() === String(code).toLowerCase()) {
+      sheet.getRange(i + 1, 4).setValue(maxPrix).setNumberFormat('#,##0.000 " DT"');
+      break;
+    }
+  }
+}
+
+function saveProduct(data) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_PRODUCTS);
+  if (!sheet) throw new Error("Feuille Produits introuvable. Lancez l'initialisation.");
+
+  if (!data.code || !data.designation || !data.categorie)
+    throw new Error("Champs obligatoires manquants.");
+
+  // ★ Le fournisseur est obligatoire lors de l'AJOUT d'un produit
+  //   (un article pourra ensuite avoir plusieurs fournisseurs — voir Page 6 : Fournisseurs).
+  const fournisseur = String(data.fournisseur || "").trim();
+  const prixFournisseur = Number(data.prixFournisseur) || 0;
+  if (data.mode === 'add') {
+    if (!fournisseur) throw new Error("Le fournisseur est obligatoire pour ajouter un nouveau produit.");
+    if (prixFournisseur <= 0) throw new Error("Indiquez le prix d'achat fournisseur pour ce produit.");
+  }
+
+  // ★ Prix d'Achat initial = prix fournisseur saisi ; sera recalculé au MAX après liaison fournisseur (voir saveSupplier)
+  const pa = prixFournisseur > 0 ? prixFournisseur : (Number(data.prixAchat) || 0);
+  const pv = Number(data.prixVente) || 0;
+  const si = parseInt(data.stockInitial) || 0;
+  const se = parseInt(data.seuil) || 0;
+
+  const allData = sheet.getDataRange().getValues();
+  let existingRow = -1;
+  for (let i = 1; i < allData.length; i++) {
+    if (String(allData[i][0]).toLowerCase() === String(data.code).toLowerCase()) {
+      existingRow = i + 1; break;
+    }
+  }
+
+  if (data.mode === 'add' && existingRow > 0)
+    throw new Error("Le code « " + data.code + " » existe déjà. Utilisez le mode Modifier.");
+  if (data.mode === 'edit' && existingRow < 0)
+    throw new Error("Code « " + data.code + " » introuvable. Vérifiez le code.");
+
+  const targetRow = (data.mode === 'edit') ? existingRow : sheet.getLastRow() + 1;
+
+  if (data.mode === 'add') {
+    sheet.getRange(targetRow, 1, 1, 6).setValues([[data.code, data.designation, data.categorie, pa, pv, si]]);
+    sheet.getRange(targetRow, 9).setValue(se);
+    // ★ Lie automatiquement le fournisseur saisi à ce nouvel article (Page 6 : Fournisseurs)
+    saveSupplier({ nom: fournisseur, telephone: data.fournisseurTel || "", adresse: data.fournisseurAdr || "",
+                   codeProduit: data.code, prixFournisseur: prixFournisseur });
+  } else {
+    sheet.getRange(targetRow, 1, 1, 6).setValues([[data.code, data.designation, data.categorie, pa, pv, si]]);
+    sheet.getRange(targetRow, 9).setValue(se);
+    // En mode Modifier, un nouveau fournisseur/prix est optionnel mais met aussi à jour le Prix d'Achat
+    if (fournisseur && prixFournisseur > 0) {
+      saveSupplier({ nom: fournisseur, telephone: data.fournisseurTel || "", adresse: data.fournisseurAdr || "",
+                     codeProduit: data.code, prixFournisseur: prixFournisseur });
+    }
+    recalculateSalesRows(SpreadsheetApp.getActiveSpreadsheet());
+  }
+
+  SpreadsheetApp.flush();
+  updateDashboardValues();
+
+  return data.mode === 'add'
+    ? "✅  Produit « " + data.designation + " » ajouté avec succès (fournisseur : " + fournisseur + ") !"
+    : "✅  Produit « " + data.designation + " » mis à jour !";
+}
+
+/**
+ * ★ MODIFICATION : getAllProducts() retourne maintenant `stock` = stockActuel
+ * calculé en JS en excluant les ventes ANNULÉES — utilisé pour afficher
+ * le stock actuel dans la fenêtre Modifier et dans la fenêtre Vente.
+ */
+function getAllProducts() {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_PRODUCTS);
+  if (!sheet) return [];
+
+  const salesSheet = ss.getSheetByName(SHEET_SALES);
+  const qteVendueMap = {};
+  if (salesSheet) {
+    const sv = salesSheet.getDataRange().getValues();
+    for (let i = 1; i < sv.length; i++) {
+      if (!sv[i][2]) continue;
+      // ★ Exclure les ventes ANNULÉES du calcul du stock actuel
+      if (String(sv[i][10]).trim().toUpperCase() === "ANNULÉ") continue;
+      const code = String(sv[i][2]);
+      qteVendueMap[code] = (qteVendueMap[code] || 0) + (Number(sv[i][5]) || 0);
+    }
+  }
+
+  const data = sheet.getDataRange().getValues();
+  const result = [];
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    if (!r[0]) continue;
+    const code         = String(r[0]);
+    const stockInitial = Number(r[5]) || 0;
+    const stockActuel  = stockInitial - (qteVendueMap[code] || 0); // ★ Stock réel après ventes (hors annulées)
+    result.push({
+      code:         code,
+      designation:  String(r[1]),
+      categorie:    String(r[2]),
+      prixAchat:    Number(r[3]) || 0,
+      prixVente:    Number(r[4]) || 0,
+      stockInitial: stockInitial,   // Pour affichage info dans le dialog modifier
+      stock:        stockActuel,    // ★ Stock ACTUEL = ce qui est physiquement disponible
+      seuil:        Number(r[8]) || 0
+    });
+  }
+  return result;
+}
+
+function saveSale(payload) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const salesSheet = ss.getSheetByName(SHEET_SALES);
+  const prodSheet  = ss.getSheetByName(SHEET_PRODUCTS);
+  if (!salesSheet) throw new Error("Feuille Ventes introuvable. Lancez l'initialisation.");
+  if (!prodSheet)  throw new Error("Feuille Produits introuvable. Lancez l'initialisation.");
+
+  const cart    = payload.cart;
+  const date    = payload.date;
+  const payment = payload.payment;
+  // ★ Client : doit correspondre à un client EXISTANT (sélectionné ou tapé) ; sinon "Client Passager"
+  const typedClient = String(payload.client || "").trim();
+  let client = "Client Passager";
+  if (typedClient) {
+    const existing = getAllClients().find(c => c.nom.toLowerCase() === typedClient.toLowerCase());
+    client = existing ? existing.nom : "Client Passager";
+  }
+
+  if (!cart || cart.length === 0) throw new Error("Panier vide.");
+  if (!date)    throw new Error("Date manquante.");
+  if (!payment) throw new Error("Mode de paiement manquant.");
+
+  const prodData = prodSheet.getDataRange().getValues();
+  const prodMap = {};
+  for (let i = 1; i < prodData.length; i++) {
+    const r = prodData[i];
+    if (!r[0]) continue;
+    prodMap[String(r[0])] = {
+      designation: String(r[1]),
+      prixAchat:   Number(r[3]) || 0,
+      prixVente:   Number(r[4]) || 0
+    };
+  }
+
+  let maxId = 0;
+  const lastRow = Math.max(salesSheet.getLastRow(), 1);
+  const colA = salesSheet.getRange("A2:A" + lastRow).getValues();
+  colA.forEach(r => {
+    const m = String(r[0]).match(/VTE-(\d+)/);
+    if (m) maxId = Math.max(maxId, parseInt(m[1]));
+  });
+
+  let startRow = salesSheet.getLastRow() + 1;
+  for (let i = 0; i < colA.length; i++) {
+    if (!colA[i][0]) { startRow = i + 2; break; }
+  }
+
+  const saleDate = new Date(date + "T12:00:00");
+
+  const rowsData = [];
+  cart.forEach((item) => {
+    maxId++;
+    const prod    = prodMap[item.code] || { designation: item.designation || "Produit inconnu", prixAchat: 0, prixVente: Number(item.prixVente) || 0 };
+    const qte     = Number(item.qty) || 0;
+    const remise  = Number(item.remise) || 0;
+    const prixNet = Math.max(prod.prixVente - remise, 0);
+    const total   = prixNet * qte;
+    const profit  = (prixNet - prod.prixAchat) * qte;
+
+    rowsData.push([
+      "VTE-" + String(maxId).padStart(3, "0"),  // A : ID
+      saleDate,                                   // B : Date
+      item.code,                                  // C : Code produit
+      prod.designation,                           // D : Désignation
+      prixNet,                                    // E : Prix Net
+      qte,                                        // F : Quantité
+      total,                                      // G : Total
+      payment,                                    // H : Mode paiement
+      profit,                                     // I : Profit
+      remise,                                     // J : Remise
+      "",                                         // K : Statut (vide = actif) ★
+      client                                       // L : Client ★
+    ]);
+  });
+
+  rowsData.forEach((row, i) => {
+    const r = startRow + i;
+    salesSheet.getRange(r, 1, 1, 12).setValues([row]);   // ★ 12 colonnes
+    salesSheet.getRange(r, 2).setNumberFormat("DD/MM/YYYY");
+    salesSheet.getRange(r, 5).setNumberFormat('#,##0.000 " DT"');
+    salesSheet.getRange(r, 7).setNumberFormat('#,##0.000 " DT"');
+    salesSheet.getRange(r, 9).setNumberFormat('#,##0.000 " DT"');
+    salesSheet.getRange(r, 10).setNumberFormat('#,##0.000 " DT"');
+  });
+
+  SpreadsheetApp.flush();
+  updateDashboardValues();
+
+  const totalAmount = rowsData.reduce((s, row) => s + (Number(row[6])||0), 0);
+  const totalProfit = rowsData.reduce((s, row) => s + (Number(row[8])||0), 0);
+  const totalRemise = rowsData.reduce((s, row) => s + (Number(row[9])||0) * (Number(row[5])||0), 0);
+  const nbUnites    = rowsData.reduce((s, row) => s + (Number(row[5])||0), 0);
+  let msg = "✅  Vente enregistrée ! " + cart.length + " référence(s) | " +
+    nbUnites + " unité(s) | Total : " + totalAmount.toFixed(3) + " DT | Profit : " + totalProfit.toFixed(3) + " DT";
+  if (totalRemise > 0) msg += " | Remise accordée : " + totalRemise.toFixed(3) + " DT";
+  return msg;
+}
+
+
+// ============================================================
+//  ★★★ NOUVEAU : CLIENTS / FOURNISSEURS / COMMANDES ★★★
+// ============================================================
+
+/** Enregistre un client (Page 7). Empêche les doublons de nom. */
+function saveClient(data) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const s = ensureClientsSheet(ss);
+  const nom = String(data.nom || "").trim();
+  if (!nom) throw new Error("Le nom du client est obligatoire.");
+
+  const last = s.getLastRow();
+  if (last >= 2) {
+    const noms = s.getRange(2, 1, last - 1, 1).getValues();
+    for (let i = 0; i < noms.length; i++) {
+      if (String(noms[i][0]).trim().toLowerCase() === nom.toLowerCase())
+        throw new Error("Le client « " + nom + " » existe déjà.");
+    }
+  }
+  s.appendRow([nom, data.telephone || "", data.adresse || "", new Date()]);
+  s.getRange(s.getLastRow(), 4).setNumberFormat("DD/MM/YYYY");
+  return "✅  Client « " + nom + " » enregistré avec succès !";
+}
+
+/** Enregistre un fournisseur pour un produit donné (Page 6). Un fournisseur peut avoir plusieurs lignes (une par produit). */
+function saveSupplier(data) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const s = ensureSuppliersSheet(ss);
+  const nom = String(data.nom || "").trim();
+  const code = String(data.codeProduit || "").trim();
+  if (!nom) throw new Error("Le nom du fournisseur est obligatoire.");
+  // ★ Le produit n'est plus obligatoire : un fournisseur peut être enregistré seul,
+  // puis lié à un ou plusieurs articles plus tard.
+  if (!code) {
+    s.appendRow([nom, data.telephone || "", data.adresse || "", "", "", new Date()]);
+    const r = s.getLastRow();
+    s.getRange(r, 6).setNumberFormat("DD/MM/YYYY");
+    return "✅  Fournisseur « " + nom + " » enregistré (sans article associé) !";
+  }
+
+  const prod = findProduct(code);
+  // Cherche une ligne existante (même fournisseur + même produit) pour mise à jour du prix
+  const last = s.getLastRow();
+  let existingRow = -1;
+  if (last >= 2) {
+    const rows = s.getRange(2, 1, last - 1, 4).getValues();
+    for (let i = 0; i < rows.length; i++) {
+      if (String(rows[i][0]).trim().toLowerCase() === nom.toLowerCase() &&
+          String(rows[i][3]).trim().toLowerCase() === code.toLowerCase()) { existingRow = i + 2; break; }
+    }
+  }
+  const prix = Number(data.prixFournisseur) || 0;
+  if (existingRow > 0) {
+    s.getRange(existingRow, 2).setValue(data.telephone || "");
+    s.getRange(existingRow, 3).setValue(data.adresse || "");
+    s.getRange(existingRow, 5).setValue(prix).setNumberFormat('#,##0.000 " DT"');
+    s.getRange(existingRow, 6).setValue(new Date()).setNumberFormat("DD/MM/YYYY");
+  } else {
+    s.appendRow([nom, data.telephone || "", data.adresse || "", code, prix, new Date()]);
+    const r = s.getLastRow();
+    s.getRange(r, 5).setNumberFormat('#,##0.000 " DT"');
+    s.getRange(r, 6).setNumberFormat("DD/MM/YYYY");
+  }
+  // ★ Le Prix d'Achat du produit affiche toujours le DERNIER prix fournisseur saisi
+  if (prix > 0) recalcProductPurchasePrice(code);
+  return "✅  Fournisseur « " + nom + " » enregistré pour le produit " + code +
+    (prod ? " (" + prod.designation + ")" : "") + " !";
+}
+
+function getAllClients() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const s = ensureClientsSheet(ss);
+  const last = s.getLastRow();
+  if (last < 2) return [];
+  const data = s.getRange(2, 1, last - 1, 4).getValues();
+  return data.filter(r => r[0]).map(r => ({ nom: String(r[0]), telephone: String(r[1]), adresse: String(r[2]) }));
+}
+
+function getAllSuppliers() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const s = ensureSuppliersSheet(ss);
+  const last = s.getLastRow();
+  if (last < 2) return [];
+  const data = s.getRange(2, 1, last - 1, 6).getValues();
+  return data.filter(r => r[0]).map(r => ({
+    nom: String(r[0]), telephone: String(r[1]), adresse: String(r[2]),
+    codeProduit: String(r[3]), prixFournisseur: Number(r[4]) || 0
+  }));
+}
+
+/**
+ * ★ Comparateur de prix fournisseurs pour un produit (et tout produit de même désignation).
+ * Retourne la liste des fournisseurs triée par prix croissant.
+ */
+function getSuppliersForProduct(code) {
+  const prod = findProduct(code);
+  if (!prod) return [];
+
+  // Récupère tous les codes produits qui partagent la même désignation (comparaison inter-produits)
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const prodSheet = ss.getSheetByName(SHEET_PRODUCTS);
+  const sameDesigCodes = { };
+  sameDesigCodes[String(code)] = true;
+  if (prodSheet) {
+    const pData = prodSheet.getDataRange().getValues();
+    for (let i = 1; i < pData.length; i++) {
+      if (String(pData[i][1]).trim().toLowerCase() === prod.designation.trim().toLowerCase()) {
+        sameDesigCodes[String(pData[i][0])] = true;
+      }
+    }
+  }
+
+  const suppliers = getAllSuppliers().filter(s => sameDesigCodes[s.codeProduit]);
+  suppliers.sort((a, b) => a.prixFournisseur - b.prixFournisseur);
+  return suppliers;
+}
+
+/**
+ * ★ Crée une ligne de commande fournisseur pour un produit donné.
+ */
+function createOrderLine(codeProduit, nomFournisseur, qte, prixFournisseur) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const s = ensureOrdersSheet(ss);
+  const prod = findProduct(codeProduit) || { designation: "Produit inconnu" };
+  qte = Math.max(parseInt(qte) || 1, 1);
+  const prix = Number(prixFournisseur) || 0;
+  const total = prix * qte;
+
+  let maxId = 0;
+  const last = s.getLastRow();
+  if (last >= 2) {
+    s.getRange(2, 1, last - 1, 1).getValues().forEach(r => {
+      const m = String(r[0]).match(/CMD-(\d+)/);
+      if (m) maxId = Math.max(maxId, parseInt(m[1]));
+    });
+  }
+  const id = "CMD-" + String(maxId + 1).padStart(3, "0");
+  s.appendRow([id, new Date(), nomFournisseur, codeProduit, prod.designation, qte, prix, total, "En attente"]);
+  const r = s.getLastRow();
+  s.getRange(r, 2).setNumberFormat("DD/MM/YYYY");
+  s.getRange(r, 7, 1, 2).setNumberFormat('#,##0.000 " DT"');
+  return { id: id, designation: prod.designation, total: total };
+}
+
+/**
+ * ★ Retourne la liste des produits actuellement en alerte (rupture ou sous seuil)
+ * — utilisée par le dialogue "Commander depuis les alertes" (recherche / liste déroulante).
+ */
+function getAlertProducts() {
+  const products = getAllProducts();
+  return products
+    .filter(p => p.stock <= p.seuil)
+    .map(p => ({ code: p.code, designation: p.designation, stock: p.stock, seuil: p.seuil }));
+}
+
+/**
+ * ★ Ouvre le dialogue de commande depuis les alertes (recherche/liste + qté + meilleur fournisseur).
+ */
+function showOrderFromAlertsDialog() {
+  const html = HtmlService.createHtmlOutput(buildOrderFromAlertsDialogHtml())
+    .setWidth(560).setHeight(560).setTitle("Commander depuis les Alertes — Votre Boutique");
+  SpreadsheetApp.getUi().showModalDialog(html, "🛒  Créer une Commande depuis les Alertes");
+}
+
+function buildOrderFromAlertsDialogHtml() {
+  return '<!DOCTYPE html>' +
+'<html><head><base target="_top"><style>' +
+'*{box-sizing:border-box;margin:0;padding:0;font-family:\'Segoe UI\',Arial,sans-serif}' +
+'body{background:#F5F5F5;padding:16px}' +
+'h2{background:#B71C1C;color:white;padding:14px 16px;border-radius:8px 8px 0 0;font-size:15px}' +
+'.card{background:white;border-radius:0 0 8px 8px;padding:20px;box-shadow:0 2px 8px rgba(0,0,0,.1)}' +
+'.fg{margin-bottom:13px;position:relative}' +
+'label{display:block;font-size:12px;font-weight:600;color:#37474F;margin-bottom:4px}' +
+'input,select{width:100%;padding:8px 10px;border:1.5px solid #CFD8DC;border-radius:5px;font-size:13px;color:#263238}' +
+'#aclist{position:absolute;top:100%;left:0;right:0;z-index:9999;background:white;border:1.5px solid #B71C1C;' +
+'border-radius:0 0 6px 6px;max-height:180px;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,.2)}' +
+'.aci{padding:8px 12px;cursor:pointer;font-size:12px;border-bottom:1px solid #F5F5F5}' +
+'.aci:hover{background:#FFEBEE}' +
+'.best{background:#FFF8E1;border:1.5px solid #FFB300;border-radius:6px;padding:10px 14px;font-size:12px;margin-top:6px}' +
+'.r2{display:grid;grid-template-columns:1fr 1fr;gap:10px}' +
+'.btns{display:flex;gap:10px;margin-top:14px}' +
+'.bs{flex:2;padding:10px;background:#B71C1C;color:white;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer}' +
+'.bs:disabled{background:#BDBDBD;cursor:default}' +
+'.bc{flex:1;padding:10px;background:#ECEFF1;color:#546E7A;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer}' +
+'.msg{margin-top:12px;font-size:12px;padding:8px 12px;border-radius:5px;display:none}' +
+'.s{background:#E8F5E9;color:#2E7D32;display:block}' +
+'.e{background:#FFEBEE;color:#C62828;display:block}' +
+'</style></head><body>' +
+'<h2>🛒  Commander depuis les Alertes</h2>' +
+'<div class="card">' +
+'<div class="fg">' +
+'<label>Rechercher (Code ou Désignation), ou cliquez pour voir tous les produits en alerte</label>' +
+'<input type="text" id="srch" placeholder="Tapez pour rechercher..." autocomplete="off" oninput="onSrch()" onfocus="onSrch(true)">' +
+'<div id="aclist"></div>' +
+'</div>' +
+'<div class="fg"><label>Quantité à commander</label><input type="number" id="qte" value="1" min="1"></div>' +
+'<div id="bestZone"></div>' +
+'<div class="btns">' +
+'<button class="bs" id="btnC" onclick="doOrder()" disabled>🛒  Commander</button>' +
+'<button class="bc" onclick="google.script.host.close()">Fermer</button>' +
+'</div>' +
+'<div class="msg" id="msg"></div>' +
+'</div>' +
+'<script>' +
+'var alertList=[],selCode="",bestSupplier=null;' +
+'function norm(s){return (s||"").toString().toLowerCase().normalize("NFD").replace(/[\\u0300-\\u036f]/g,"");}' +
+'window.onload=function(){' +
+'  google.script.run.withSuccessHandler(function(list){alertList=list||[];}).getAlertProducts();' +
+'  document.addEventListener("click",function(ev){' +
+'    if(!ev.target.closest("#srch")&&!ev.target.closest("#aclist"))document.getElementById("aclist").innerHTML="";' +
+'  });' +
+'};' +
+'function onSrch(showAll){' +
+'  var q=norm(document.getElementById("srch").value.trim());' +
+'  var ac=document.getElementById("aclist");' +
+'  if(!q&&!showAll){ac.innerHTML="";return;}' +
+'  var matches=alertList.filter(function(p){return !q||norm(p.code).indexOf(q)>=0||norm(p.designation).indexOf(q)>=0;}).slice(0,30);' +
+'  ac.innerHTML=matches.map(function(p){return \'<div class="aci" data-code="\'+p.code+\'" onclick="onSrchPick(this)">\'+p.code+\' — \'+p.designation+\' (stock:\'+p.stock+\'/seuil:\'+p.seuil+\')</div>\';}).join("")||\'<div class="aci">Aucun résultat</div>\';' +
+'}' +
+'function onSrchPick(el){onPick(el.getAttribute("data-code"));document.getElementById("aclist").innerHTML="";}' +
+'function onPick(code){' +
+'  selCode=code;bestSupplier=null;' +
+'  document.getElementById("btnC").disabled=true;' +
+'  if(!code){document.getElementById("bestZone").innerHTML="";return;}' +
+'  var p=alertList.find(function(x){return x.code===code;});' +
+'  document.getElementById("srch").value=p?p.code+" — "+p.designation:code;' +
+'  document.getElementById("qte").value=p?Math.max(p.seuil-p.stock+1,1):1;' +
+'  document.getElementById("bestZone").innerHTML="Recherche du meilleur fournisseur...";' +
+'  google.script.run.withSuccessHandler(function(list){' +
+'    if(!list||!list.length){document.getElementById("bestZone").innerHTML=\'<div class="best" style="border-color:#EF5350;background:#FFEBEE">⚠️ Aucun fournisseur enregistré pour ce produit.</div>\';return;}' +
+'    bestSupplier=list[0];' +
+'    document.getElementById("bestZone").innerHTML=\'<div class="best">🥇 Meilleur prix : <strong>\'+bestSupplier.nom+\'</strong> — \'+bestSupplier.prixFournisseur.toFixed(3)+\' DT / unité</div>\';' +
+'    document.getElementById("btnC").disabled=false;' +
+'  }).getSuppliersForProduct(code);' +
+'}' +
+'function doOrder(){' +
+'  if(!selCode||!bestSupplier){showMsg("Sélectionnez un produit avec un fournisseur disponible.","e");return;}' +
+'  var qte=parseInt(document.getElementById("qte").value)||1;' +
+'  var btn=document.getElementById("btnC");' +
+'  btn.disabled=true;btn.textContent="⏳ Commande en cours...";' +
+'  google.script.run.withSuccessHandler(function(r){' +
+'    showMsg("✅  Commande "+r.id+" créée pour "+r.designation+" ("+r.total.toFixed(3)+" DT).","s");' +
+'    btn.disabled=false;btn.textContent="🛒  Commander";' +
+'  }).withFailureHandler(function(e){showMsg("Erreur : "+e.message,"e");btn.disabled=false;btn.textContent="🛒  Commander";})' +
+'    .createOrderLine(selCode,bestSupplier.nom,qte,bestSupplier.prixFournisseur);' +
+'}' +
+'function showMsg(t,cls){var el=document.getElementById("msg");el.textContent=t;el.className="msg "+cls;}' +
+'<\/script></body></html>';
+}
+
+
+// ============================================================
+function generateMonthlyReport() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const rSheet = ss.getSheetByName(SHEET_REPORTS);
+  if (!rSheet) { SpreadsheetApp.getUi().alert("❌  Lancez d'abord l'initialisation."); return; }
+  rSheet.getRange("A8:H200").clear();
+
+  const salesSheet = ss.getSheetByName(SHEET_SALES);
+  const prodSheet  = ss.getSheetByName(SHEET_PRODUCTS);
+  if (!salesSheet || !prodSheet) return;
+
+  const salesData = salesSheet.getDataRange().getValues();
+  const prodData  = prodSheet.getDataRange().getValues();
+  const paMap = {};
+  for (let i = 1; i < prodData.length; i++) {
+    if (prodData[i][0]) paMap[String(prodData[i][0])] = Number(prodData[i][3])||0;
+  }
+
+  const now = new Date(), cm = now.getMonth(), cy = now.getFullYear();
+  const map = {}; let mTotal=0, mProfit=0;
+
+  for (let i = 1; i < salesData.length; i++) {
+    const r = salesData[i];
+    if (!r[1]||!r[2]) continue;
+    // ★ Exclure les ventes annulées du rapport
+    if (String(r[10]).trim().toUpperCase() === "ANNULÉ") continue;
+    const d = new Date(r[1]);
+    if (d.getMonth()!==cm||d.getFullYear()!==cy) continue;
+    const code=String(r[2]), prixU=Number(r[4])||0, qte=Number(r[5])||0;
+    const total=prixU*qte, profit=(prixU-(paMap[code]||0))*qte;
+    if (!map[code]) map[code]={code,desig:String(r[3])||code,qty:0,total:0,profit:0};
+    map[code].qty+=qte; map[code].total+=total; map[code].profit+=profit;
+    mTotal+=total; mProfit+=profit;
+  }
+
+  const mn = now.toLocaleString("fr-FR",{month:"long",year:"numeric"});
+  const rows = Object.values(map).sort((a,b)=>b.total-a.total);
+
+  rSheet.getRange("A8:E8").merge().setValue("📅  RAPPORT — "+mn.toUpperCase())
+    .setBackground(COLOR_ACCENT).setFontColor("white").setFontWeight("bold").setHorizontalAlignment("center");
+  ["Code","Désignation","Qté","CA (DT)","Profit (DT)"].forEach((h,i)=>{
+    rSheet.getRange(9,i+1).setValue(h).setBackground(COLOR_HEADER_BG).setFontColor("white").setFontWeight("bold").setHorizontalAlignment("center");
+  });
+  rows.forEach((item,i)=>{
+    const r=10+i;
+    rSheet.getRange(r,1).setValue(item.code); rSheet.getRange(r,2).setValue(item.desig);
+    rSheet.getRange(r,3).setValue(item.qty);
+    rSheet.getRange(r,4).setValue(item.total).setNumberFormat('#,##0.000 " DT"');
+    rSheet.getRange(r,5).setValue(item.profit).setNumberFormat('#,##0.000 " DT"');
+    if(i%2===1) rSheet.getRange(r,1,1,5).setBackground(COLOR_ALT_ROW);
+  });
+  const tr=10+rows.length;
+  rSheet.getRange(tr,1,1,3).merge().setValue("TOTAL "+mn.toUpperCase()).setFontWeight("bold").setBackground(COLOR_HEADER_BG).setFontColor("white").setHorizontalAlignment("right");
+  rSheet.getRange(tr,4).setValue(mTotal).setNumberFormat('#,##0.000 " DT"').setFontWeight("bold").setBackground(COLOR_ACCENT).setFontColor("white");
+  rSheet.getRange(tr,5).setValue(mProfit).setNumberFormat('#,##0.000 " DT"').setFontWeight("bold").setBackground(mProfit>=0?"#1B5E20":"#B71C1C").setFontColor("white");
+
+  ss.setActiveSheet(rSheet);
+  SpreadsheetApp.getUi().alert("✅  Rapport généré pour "+mn+"\n"+rows.length+" produits — CA : "+mTotal.toFixed(3)+" DT — Profit : "+mProfit.toFixed(3)+" DT");
+}
+
+
+// ============================================================
+//  14. UTILITAIRES
+// ============================================================
+function formatHeaderRow(sheet, row, numCols) {
+  sheet.getRange(row,1,1,numCols)
+    .setBackground(COLOR_HEADER_BG).setFontColor(COLOR_HEADER_TEXT)
+    .setFontWeight("bold").setFontSize(11)
+    .setHorizontalAlignment("center").setVerticalAlignment("middle").setWrap(true)
+    .setBorder(true,true,true,true,true,true,"#FFFFFF",SpreadsheetApp.BorderStyle.SOLID);
+  sheet.setRowHeight(row,40);
+}
+
+function generateSaleId(sheet) {
+  const data = sheet.getRange("A2:A"+Math.max(sheet.getLastRow(),2)).getValues();
+  let max=0;
+  data.forEach(r=>{const m=String(r[0]).match(/VTE-(\d+)/);if(m)max=Math.max(max,parseInt(m[1]));});
+  return "VTE-"+String(max+1).padStart(3,"0");
+}
+
+
+// ============================================================
+//  FIN DU SCRIPT — Votre Boutique v5.0
+// ============================================================
