@@ -28,7 +28,7 @@ dialog::backdrop{background:#0008}dialog label{display:block;margin:8px 0 3px;co
 .hit{border:1px solid var(--bd);border-radius:8px;max-height:220px;overflow:auto}.hit div{padding:7px 10px;cursor:pointer;border-bottom:1px solid var(--bd)}.hit div:hover{background:var(--bd)}
 .best{background:#d3f9d8;color:#1b5e20}
 #pr{display:none}
-@media print{body>*:not(#pr){display:none!important}#pr{display:block!important;color:#000;background:#fff;padding:10px}#pr table{font-size:12px}#pr th,#pr td{border:1px solid #999}}
+@media print{html,body{display:block!important;background:#fff!important;min-height:0!important}body>*:not(#pr){display:none!important}#pr{display:block!important;width:100%;color:#000!important;background:#fff!important;padding:10px}#pr *{color:#000!important}#pr table{font-size:12px;width:100%}#pr th,#pr td{border:1px solid #999;white-space:normal}}
 @media(max-width:760px){body{flex-direction:column}nav{width:100%;height:auto;position:static;display:flex;flex-wrap:wrap;gap:4px}nav h1{width:100%}nav a{padding:6px 9px}}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -62,7 +62,7 @@ async function init(){
   S.products.forEach(p=>{if(p.sup)S.prices.push({code:p.code,sup:p.sup,price:p.last||p.buy,d:'import'})});
   save();
  }
- $('#nav').innerHTML='<h1>🏍️ Matmata Moto Store</h1><div style="margin:-8px 8px 10px;font-size:11px;color:var(--mu)">version 4 · 10/10/2026</div>'+PAGES.map(([k,t])=>`<a href="#${k}" data-k="${k}">${t}</a>`).join('');
+ $('#nav').innerHTML='<h1>🏍️ Matmata Moto Store</h1><div style="margin:-8px 8px 10px;font-size:11px;color:var(--mu)">version 5 · 30/10/2026</div>'+PAGES.map(([k,t])=>`<a href="#${k}" data-k="${k}">${t}</a>`).join('');
  addEventListener('hashchange',route);route();
 }
 function route(){
@@ -250,18 +250,20 @@ function delPerson(c,i){if(confirm('Supprimer ?')){S[c].splice(i,1);save();go()}
 
 /* ---------- Alertes ---------- */
 R.alert=()=>{const L=S.products.filter(isAl).sort((a,b)=>a.stock-b.stock);
- return`<h2>Produits en alerte (${L.length})</h2><div class="c tw"><table><tr><th>Code</th><th>Désignation</th><th class="n">Stock</th><th class="n">Seuil</th><th>Fournisseur</th><th></th></tr>
- ${rows(L.slice(0,300),p=>`<tr><td>${esc(p.code)}</td><td>${esc(p.name)}</td><td class="n"><span class="tag r">${p.stock}</span></td><td class="n">${p.thr}</td><td>${esc(p.sup)}</td><td><button class="s p" onclick="formO('${esc(p.code)}')">Commander</button></td></tr>`)}</table>${L.length>300?'<small>300 premiers affichés (les plus critiques)</small>':''}</div>`};
+ return`<h2>Produits en alerte (${L.length})</h2>${olBlock()}<div class="c tw"><table><tr><th>Code</th><th>Désignation</th><th class="n">Stock</th><th class="n">Seuil</th><th>Fournisseur</th><th></th></tr>
+ ${rows(L.slice(0,300),p=>`<tr><td>${esc(p.code)}</td><td>${esc(p.name)}</td><td class="n"><span class="tag r">${p.stock}</span></td><td class="n">${p.thr}</td><td>${esc(p.sup)}</td><td><button class="s" onclick="olAdd('${esc(p.code)}')">+ Liste</button> <button class="s p" onclick="formO('${esc(p.code)}')">Commander</button></td></tr>`)}</table>${L.length>300?'<small>300 premiers affichés (les plus critiques)</small>':''}</div>`};
 
 /* ---------- Impression ---------- */
 function printDoc(html){const p=$('#pr');p.innerHTML=`<h2 style="margin:0">Matmata Moto Store</h2><small>Imprimé le ${new Date().toLocaleString('fr-FR')}</small><hr>`+html;
- window.onafterprint=()=>{p.innerHTML=''};setTimeout(()=>window.print(),50)}
+ setTimeout(()=>window.print(),300)}
 const orderDoc=o=>`<h3>Bon de commande n° ${o.id}</h3><p>Date : ${o.d.replace('T',' ')}<br>Fournisseur : <b>${esc(o.sup)}</b></p><table><tr><th>Code</th><th>Désignation</th><th>Qté</th><th>Prix unit. (DT)</th><th>Total (DT)</th></tr>
  <tr><td>${esc(o.code)}</td><td>${esc(o.name)}</td><td>${o.qty}</td><td>${o.price?f(o.price,3):'—'}</td><td>${o.price?f(o.price*o.qty,3):'—'}</td></tr></table>`;
 function printRap(){printDoc($('#rp').innerHTML)}
 
 /* ---------- Commandes ---------- */
-R.cmd=()=>`<h2>Commandes</h2><div class="bar"><button class="p" onclick="formO()">+ Commander</button></div><div class="c tw"><table><tr><th>N°</th><th>Date</th><th>Produit</th><th>Fournisseur</th><th class="n">Qté</th><th class="n">Prix unit.</th><th>Statut</th><th></th></tr>
+R.cmd=()=>`<h2>Commandes</h2><div class="bar"><button class="p" onclick="formO()">+ Commander</button></div>
+ ${olBlock()}
+ <div class="c tw"><table><tr><th>N°</th><th>Date</th><th>Produit</th><th>Fournisseur</th><th class="n">Qté</th><th class="n">Prix unit.</th><th>Statut</th><th></th></tr>
  ${rows([...S.orders].reverse(),o=>`<tr><td>${o.id}</td><td>${o.d.replace('T',' ')}</td><td>${esc(o.name)}</td><td>${esc(o.sup)}</td><td class="n">${o.qty}</td><td class="n">${o.price?f(o.price,3):'—'}</td><td><span class="tag ${o.st==='Reçue'?'v':''}">${o.st}</span></td>
  <td><button class="s" onclick="printDoc(orderDoc(S.orders.find(x=>x.id==${o.id})))">🖨 Imprimer</button> ${o.st==='Commandée'?`<button class="s" onclick="recv(${o.id})">Marquer reçue</button> <button class="s d" onclick="delO(${o.id})">Annuler</button>`:''}</td></tr>`)||'<tr><td colspan=8>Aucune commande</td></tr>'}</table></div>`;
 function formO(code){const p=code?P(code):null,sg=p?Math.max(1,p.thr*2-p.stock):1,best=p&&S.prices.filter(x=>x.code===code).sort((a,b)=>a.price-b.price)[0];
@@ -277,6 +279,54 @@ function saveO(pr){const c=$('#o1').dataset.c,q=+$('#o3').value,s=$('#o2').value
  S.orders.push({id:Math.max(0,...S.orders.map(o=>o.id))+1,d:now(),code:c,name:P(c).name,sup:s,qty:q,price:+$('#o4').value||0,st:'Commandée'});const o=S.orders[S.orders.length-1];save();closeM();location.hash='#cmd';go();if(pr)printDoc(orderDoc(o))}
 function recv(id){const o=S.orders.find(x=>x.id===id),p=P(o.code);o.st='Reçue';if(p){p.stock+=o.qty;mv(o.code,'Réception commande',o.qty,'Cmd #'+id+' — '+o.sup);if(o.price){p.last=o.price;setPrice(o.code,o.sup,o.price)}}save();go()}
 function delO(id){if(confirm('Annuler cette commande ?')){S.orders=S.orders.filter(o=>o.id!==id);save();go()}}
+
+/* ---------- Liste d'articles à commander ---------- */
+function olBlock(){return`<div class="c"><h3 style="margin-top:0">📝 Liste des articles à commander</h3>
+ <div class="bar"><input class="w" id="olq" placeholder="Rechercher un article à ajouter (code ou désignation)…"><button onclick="olAlerts()">⚠️ Ajouter les articles en alerte</button></div>
+ <div class="hit" id="olh" style="display:none;margin-bottom:10px"></div><div class="tw" id="olt"></div></div>`}
+A.alert=()=>olInit();
+const OL=()=>S.olist||(S.olist=[]);
+const bestP=c=>S.prices.filter(x=>x.code===c&&x.price>0).sort((a,b)=>a.price-b.price)[0];
+A.cmd=()=>olInit();
+function olInit(){olr();$('#olq').oninput=e=>{const q=e.target.value.toLowerCase().trim(),h=$('#olh');if(!q){h.style.display='none';return}
+ const L=S.products.filter(p=>p.code.toLowerCase().includes(q)||p.name.toLowerCase().includes(q)).slice(0,15);
+ h.style.display='block';h.innerHTML=L.map(p=>{const b=bestP(p.code);return`<div onclick="olAdd('${esc(p.code)}')">${esc(p.code)} — ${esc(p.name)} <small>(stock ${p.stock}${b?' · meilleur prix : '+esc(b.sup)+' '+f(b.price,3)+' DT':''})</small></div>`}).join('')||'<div>Aucun résultat</div>'}}
+function olAdd(c,quiet){const p=P(c);if(!p)return;const l=OL(),x=l.find(y=>y.code===c);
+ if(x){if(!quiet)x.qty++}else{const b=bestP(c);l.push({code:c,qty:Math.max(1,p.thr*2-p.stock),price:b?b.price:(p.last||p.buy||0),sup:b?b.sup:(p.sup||'')})}
+ save();if(!quiet){$('#olq').value='';$('#olh').style.display='none';olr()}}
+function olAlerts(){const L=S.products.filter(isAl);if(!L.length)return alert('Aucun article en alerte.');
+ if(L.length>50&&!confirm(L.length+' articles en alerte vont être ajoutés à la liste. Continuer ?'))return;L.forEach(p=>olAdd(p.code,true));olr()}
+function olr(){const l=OL(),e=$('#olt');if(!e)return;
+ if(!l.length){e.innerHTML='<p style="color:var(--mu)">Liste vide — recherchez un article pour l\'ajouter. Le fournisseur au meilleur prix est sélectionné automatiquement.</p>';return}
+ const tot=l.reduce((a,x)=>a+x.price*x.qty,0);
+ e.innerHTML=`<table><tr><th>Désignation article</th><th>Fournisseur</th><th class="n">Prix unitaire (DT)</th><th class="n">Quantité</th><th class="n">Total (DT)</th><th></th></tr>
+ ${rows(l,(x,i)=>{const p=P(x.code),pr=S.prices.filter(y=>y.code===x.code&&y.price>0).sort((a,b)=>a.price-b.price),b=pr[0],names=new Set(pr.map(y=>y.sup)),
+  o=pr.map((y,k)=>`<option value="${esc(y.sup)}" ${y.sup===x.sup?'selected':''}>${esc(y.sup)} — ${f(y.price,3)} DT${k===0?' ⭐':''}</option>`).join('')+S.suppliers.filter(s=>!names.has(s.name)).map(s=>`<option value="${esc(s.name)}" ${s.name===x.sup?'selected':''}>${esc(s.name)}</option>`).join('');
+  return`<tr><td>${esc(p?p.name:x.code)}</td><td><select onchange="olSup(${i},this.value)"><option value="">—</option>${o}</select>${b&&b.sup===x.sup?' <span class="tag v">⭐ meilleur prix</span>':''}</td>
+  <td class="n"><input type="number" step="0.001" min="0" value="${x.price}" style="width:100px" onchange="OL()[${i}].price=+this.value||0;save();olr()"></td>
+  <td class="n"><input type="number" min="1" value="${x.qty}" style="width:80px" onchange="OL()[${i}].qty=Math.max(1,+this.value||1);save();olr()"></td>
+  <td class="n">${f(x.price*x.qty,3)}</td><td><button class="s d" onclick="OL().splice(${i},1);save();olr()">✕</button></td></tr>`})}
+ <tr><td colspan=4 class="n"><b>Total estimé</b></td><td class="n"><b>${f(tot,3)}</b></td><td></td></tr></table>
+ <div class="bar" style="margin-top:10px"><button class="p" onclick="olXls()">⬇ Télécharger (Excel)</button><button class="p" onclick="olPrint()">🖨 Imprimer</button><button class="p" onclick="olToOrders()">✔ Créer les commandes</button><button class="d" onclick="if(confirm('Vider la liste ?')){S.olist=[];save();olr()}">Vider la liste</button><small style="color:var(--mu)">${l.length} article(s)</small></div>`}
+function olSup(i,s){const x=OL()[i],y=S.prices.find(z=>z.code===x.code&&z.sup===s&&z.price>0);x.sup=s;if(y)x.price=y.price;save();olr()}
+function olSorted(){return[...OL()].map(x=>({n:(P(x.code)||{name:x.code}).name,p:x.price,q:x.qty,s:x.sup||'—'})).sort((a,b)=>a.s.localeCompare(b.s,'fr')||a.n.localeCompare(b.n,'fr'))}
+function olXls(){const L=olSorted();if(!L.length)return alert('La liste est vide.');
+ const d=L.map(x=>({'Désignation article':x.n,'Prix unitaire':x.p,'Quantité':x.q,'Fournisseur':x.s})),fn='liste-commande-'+today();
+ if(typeof XLSX!=='undefined'){const ws=XLSX.utils.json_to_sheet(d),wb=XLSX.utils.book_new();ws['!cols']=[{wch:45},{wch:14},{wch:10},{wch:28}];XLSX.utils.book_append_sheet(wb,ws,'Commande');XLSX.writeFile(wb,fn+'.xlsx');return}
+ const q=v=>'"'+String(v).replace(/"/g,'""')+'"',csv='﻿'+Object.keys(d[0]).map(q).join(';')+'\n'+d.map(r=>Object.values(r).map(q).join(';')).join('\n'),a=document.createElement('a');
+ a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));a.download=fn+'.csv';a.click()}
+function olToOrders(){const l=OL();if(!l.length)return alert('La liste est vide.');
+ if(l.some(x=>!x.sup))return alert('Choisissez un fournisseur pour chaque article.');
+ const sups=new Set(l.map(x=>x.sup)).size;
+ if(!confirm(`Créer ${l.length} commande(s) (${sups} fournisseur(s)) dans le tableau ci-dessous et vider la liste ?`))return;
+ let id=Math.max(0,...S.orders.map(o=>o.id));
+ l.forEach(x=>{const p=P(x.code);if(p)S.orders.push({id:++id,d:now(),code:x.code,name:p.name,sup:x.sup,qty:x.qty,price:x.price||0,st:'Commandée'})});
+ S.olist=[];save();if(location.hash==='#cmd')go();else location.hash='#cmd'}
+function olPrint(){const L=olSorted();if(!L.length)return alert('La liste est vide.');
+ const tot=L.reduce((a,x)=>a+x.p*x.q,0);
+ printDoc(`<h3>Liste de commande</h3><p>Date : ${today()}</p><table><tr><th>Désignation article</th><th>Prix unitaire (DT)</th><th>Quantité</th><th>Fournisseur</th><th>Total (DT)</th></tr>
+ ${rows(L,x=>`<tr><td>${esc(x.n)}</td><td>${f(x.p,3)}</td><td>${x.q}</td><td>${esc(x.s)}</td><td>${f(x.p*x.q,3)}</td></tr>`)}
+ <tr><td colspan="4" style="text-align:right"><b>Total estimé</b></td><td><b>${f(tot,3)}</b></td></tr></table>`)}
 
 /* ---------- Comparaison de prix ---------- */
 R.cmp=()=>`<h2>Comparaison de prix</h2><div class="c"><input class="w" id="cq" placeholder="Rechercher un produit…" style="width:100%"><div class="hit" id="ch" style="display:none"></div></div><div id="cr"></div>`;
